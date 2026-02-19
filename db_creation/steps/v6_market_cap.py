@@ -5,7 +5,7 @@ from pathlib import Path
 from build_common import MARKET_CAP_DIR, OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
 
-@step("market_cap_v2", target="market_cap", depends_on=("tickers",))
+@step("market_cap_v2", target="market_cap", depends_on=("tickers",), disabled=True)
 def build_market_cap(con):
     """Read all market cap CSVs via DuckDB glob."""
     csv_pattern = str(MARKET_CAP_DIR / "*.csv")

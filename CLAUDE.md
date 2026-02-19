@@ -1,246 +1,148 @@
-# Market Data Database
+# Market Data
 
-Parquet-based market database in `db/`. Query with DuckDB (python: `import duckdb`). All parquet files use **ZSTD compression** and **122,880 row group size**.
+Parquet-based market database in `db/`. Built by `db_creation/`.
 
-Data covers stocks and ETFs, years 2000-2026. Only regular trading hours (9:00 AM - 3:59 PM ET) are included in price data.
-
-## Dependency Graph
-
-```
-tickers ──> prices ──> daily_aggs ──> ten_day_aggs
-   │                       └────────> hundred_day_aggs
-   ├──> market_cap
-   └──> insider_trades
-```
+**For table schemas, query patterns, and database documentation, see [`TABLES.md`](TABLES.md).** A copy is also placed in `db/TABLES.md` on each build.
 
 ---
 
-## tickers_v1
+## Build System Reference
 
-**File:** `db/tickers.parquet` (single file)
+All build code lives in `db_creation/`. Steps produce the parquet files in `db/`.
 
-**Sort order:** `ticker` ASC
+### File layout
 
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol (e.g. "AAPL") |
-| asset_type | VARCHAR | `"stock"` or `"etf"` (ETF wins on overlap) |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/tickers.parquet')
-WHERE ticker = 'AAPL';
+```
+db_creation/
+├── build.py              # CLI entry point
+├── build_common.py       # Constants, @step decorator, helpers
+├── summary.py            # Post-build data preview (ALL_TABLES dict must match active tables)
+└── steps/
+    ├── __init__.py       # Auto-imports v*.py in numeric order
+    ├── v1_tickers.py
+    ├── v2_prices.py
+    └── ...               # v{N}_{name}.py — N determines execution order
 ```
 
----
+### The `@step` decorator
 
-## prices_v2
+Every step is a function decorated with `@step()` in a `v*.py` file under `steps/`. The decorator registers the step; `__init__.py` auto-imports all `v*.py` files sorted numerically (v1, v2, ..., v10, v11).
 
-**File:** `db/prices/` (Hive-partitioned directory)
+```python
+from build_common import OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
-**Partitioning:** `year=YYYY/data.parquet` — one file per year (2000-2026)
-
-**Sort order within each partition:** `ticker` ASC, `ts` ASC
-
-**Data:** Hourly OHLCV bars, regular hours only (9 AM - 3:59 PM ET). Deduplicated — if a ticker appears in both stock and ETF sources, the ETF record wins.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| ts | TIMESTAMP | Bar timestamp (hourly) |
-| open | FLOAT | Opening price |
-| high | FLOAT | High price |
-| low | FLOAT | Low price |
-| close | FLOAT | Closing price |
-| volume | INTEGER | Bar volume |
-| year | BIGINT | Hive partition key (auto from path) |
-
-**Query (use hive_partitioning + year filter for pruning):**
-```sql
--- Single ticker, single year (fastest — reads one file)
-SELECT * FROM read_parquet('db/prices/**/data.parquet', hive_partitioning=true)
-WHERE year = 2024 AND ticker = 'AAPL'
-ORDER BY ts;
-
--- Single ticker, date range (prunes to relevant year partitions)
-SELECT * FROM read_parquet('db/prices/**/data.parquet', hive_partitioning=true)
-WHERE year BETWEEN 2023 AND 2024 AND ticker = 'AAPL'
-AND ts >= '2023-06-01' AND ts < '2024-07-01';
+@step("my_table_v1", target="my_table", depends_on=("prices",))
+def build_my_table(con):
+    ...
 ```
 
-**Performance notes:** Always filter on `year` to get partition pruning. Within a partition, data is sorted by `(ticker, ts)` so filtering on `ticker` benefits from row-group min/max statistics.
+Parameters:
+- **`step_id`**: Unique string, conventionally `"{target}_v{version}"`. Tracked in the manifest. Bump the version when the logic changes to trigger a rebuild.
+- **`target`**: Logical name for what this step produces. Used for dependency resolution and CLI targeting (`python build.py my_table`).
+- **`depends_on`**: Tuple of target names this step requires. Controls cascade — rebuilding a dependency triggers downstream rebuilds.
+- **`disabled`**: Set `disabled=True` to keep the code but skip execution. Shows as `DISABLED` in `--list`. Override with `--include-disabled`.
 
----
+The function receives a DuckDB in-memory connection (`con`) with 12GB memory limit and all CPU threads.
 
-## daily_aggs_v2
+### Naming convention
 
-**File:** `db/daily_aggs/` (Hive-partitioned directory)
+Files: `v{N}_{target_name}.py` — N is a positive integer that determines import/execution order. **Use the next available number** for new steps. Gaps are fine.
 
-**Partitioning:** `year=YYYY/data.parquet` — one file per year (2000-2026)
+Step IDs: `{target}_v{version}` — bump version when logic changes so the manifest detects it as new.
 
-**Sort order within each partition:** `ticker` ASC, `day` ASC
+### Output patterns
 
-**Data:** Daily OHLCV aggregated from hourly prices. Includes component sums for building higher-level aggregations without re-reading hourly data.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| day | DATE | Trading date |
-| open | FLOAT | Day open (first hourly open) |
-| high | FLOAT | Day high (max of hourly highs) |
-| low | FLOAT | Day low (min of hourly lows) |
-| close | FLOAT | Day close (last hourly close) |
-| volume | BIGINT | Total day volume |
-| sum_open | DOUBLE | Sum of all hourly opens |
-| sum_high | DOUBLE | Sum of all hourly highs |
-| sum_low | DOUBLE | Sum of all hourly lows |
-| sum_close | DOUBLE | Sum of all hourly closes |
-| sum_volume | BIGINT | Same as volume (sum of hourly volumes) |
-| cnt | UTINYINT | Number of hourly bars that day |
-| year | BIGINT | Hive partition key (auto from path) |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/daily_aggs/**/data.parquet', hive_partitioning=true)
-WHERE year = 2024 AND ticker = 'AAPL'
-ORDER BY day;
+**Single file** (small tables):
+```python
+dest = OUTPUT_DIR / "my_table.parquet"
+tmp = Path(str(dest) + ".tmp")
+con.execute(f"COPY (...) TO '{tmp}' ({PARQUET_SETTINGS})")
+tmp.rename(dest)
+count = verify_parquet(str(dest))
 ```
 
-**Component sums:** `sum_open`, `sum_high`, `sum_low`, `sum_close` are the raw sums of the hourly bar values. Combined with `cnt`, these allow computing VWAP-like averages or building multi-day aggregates without re-reading hourly data. For example, the average hourly close for a day is `sum_close / cnt`.
+**Hive-partitioned by year** (large tables):
+```python
+out_dir = OUTPUT_DIR / "my_table"
+building_dir = OUTPUT_DIR / "my_table_building"
+if building_dir.exists():
+    shutil.rmtree(building_dir)
+building_dir.mkdir(parents=True)
 
----
+# ... compute data, iterate per year ...
+for year in years:
+    year_dir = building_dir / f"year={year}"
+    year_dir.mkdir(parents=True, exist_ok=True)
+    out_path = year_dir / "data.parquet"
+    con.execute(f"COPY (...) TO '{out_path}' ({PARQUET_SETTINGS})")
+    verify_parquet(str(out_path))
 
-## ten_day_aggs_v1
-
-**File:** `db/ten_day_aggs.parquet` (single file)
-
-**Sort order:** `ticker` ASC, `block_start` ASC
-
-**Data:** Non-overlapping 10-trading-day blocks per ticker. Days are numbered sequentially per ticker and grouped into blocks of 10. The last block for a ticker may have fewer than 10 days.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| block_start | DATE | First trading day in the block |
-| block_end | DATE | Last trading day in the block |
-| open | FLOAT | Block open (first day's open) |
-| high | FLOAT | Block high (max daily high) |
-| low | FLOAT | Block low (min daily low) |
-| close | FLOAT | Block close (last day's close) |
-| volume | BIGINT | Total block volume |
-| sum_open | DOUBLE | Sum of hourly opens across all days |
-| sum_high | DOUBLE | Sum of hourly highs across all days |
-| sum_low | DOUBLE | Sum of hourly lows across all days |
-| sum_close | DOUBLE | Sum of hourly closes across all days |
-| sum_volume | BIGINT | Sum of hourly volumes across all days |
-| cnt | USMALLINT | Total hourly bar count across all days |
-| day_cnt | UTINYINT | Number of trading days in this block (<=10) |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/ten_day_aggs.parquet')
-WHERE ticker = 'AAPL'
-ORDER BY block_start;
+# Atomic swap
+if out_dir.exists():
+    stale = Path(str(out_dir) + "_old")
+    out_dir.rename(stale)
+    building_dir.rename(out_dir)
+    shutil.rmtree(stale)
+else:
+    building_dir.rename(out_dir)
 ```
 
----
+Partitioned files must be named `data.parquet` (one per `year=YYYY/` directory). Query pattern: `read_parquet('db/my_table/**/data.parquet', hive_partitioning=true)`.
 
-## hundred_day_aggs_v1
+### Using intermediate data
 
-**File:** `db/hundred_day_aggs.parquet` (single file)
+Steps that need data from raw sources (not from another step's parquet output) should compute it in-memory:
 
-**Sort order:** `ticker` ASC, `block_start` ASC
-
-**Data:** Non-overlapping 100-trading-day blocks per ticker. Same structure as ten_day_aggs but with 100-day grouping. The last block for a ticker may have fewer than 100 days.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| block_start | DATE | First trading day in the block |
-| block_end | DATE | Last trading day in the block |
-| open | FLOAT | Block open (first day's open) |
-| high | FLOAT | Block high (max daily high) |
-| low | FLOAT | Block low (min daily low) |
-| close | FLOAT | Block close (last day's close) |
-| volume | BIGINT | Total block volume |
-| sum_open | DOUBLE | Sum of hourly opens across all days |
-| sum_high | DOUBLE | Sum of hourly highs across all days |
-| sum_low | DOUBLE | Sum of hourly lows across all days |
-| sum_close | DOUBLE | Sum of hourly closes across all days |
-| sum_volume | BIGINT | Sum of hourly volumes across all days |
-| cnt | USMALLINT | Total hourly bar count across all days |
-| day_cnt | UTINYINT | Number of trading days in this block (<=100) |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/hundred_day_aggs.parquet')
-WHERE ticker = 'AAPL'
-ORDER BY block_start;
+```python
+# Load into temp table, use it, drop it
+con.execute("CREATE TABLE _tmp AS SELECT ... FROM read_csv(...)")
+con.execute("CREATE TABLE _result AS SELECT ... FROM _tmp JOIN ...")
+con.execute("DROP TABLE _tmp")
+# ... COPY _result to parquet per year ...
+con.execute("DROP TABLE _result")
 ```
 
----
+Prefix temp tables with `_` to distinguish from output.
 
-## market_cap_v2
+### Key imports from `build_common`
 
-**File:** `db/market_cap.parquet` (single file)
+| Symbol | What |
+|--------|------|
+| `OUTPUT_DIR` | `Path` to `db/` |
+| `PARQUET_SETTINGS` | `"FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880"` |
+| `step` | The `@step` decorator |
+| `log(msg)` | Timestamped stderr logging |
+| `verify_parquet(path)` | Asserts file has >= 1 row, returns count |
+| `STOCKS_ZIP_DIR` | `data_sources/stocks/data/` |
+| `ETFS_ZIP_DIR` | `data_sources/etfs/data/` |
+| `MARKET_CAP_DIR` | `data_sources/market_cap/data/` (CSVs with `date`, `market_cap` columns, one file per ticker, ticker in filename) |
+| `INSIDER_TRADES_DIR` | `data_sources/insider_trades/data/` (JSONL.GZ files, `YYYY/YYYY-MM.jsonl.gz`, top-level fields include `filedAt`, `issuer.tradingSymbol`, `reportingOwner`, `nonDerivativeTable.transactions[]`) |
 
-**Sort order:** `ticker` ASC, `day` ASC
+### CLI
 
-**Data:** Daily market capitalization. Only includes tickers present in the tickers table. Values are filtered to `cap > 0` and `cap < 20 trillion`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| day | DATE | Date |
-| cap | BIGINT | Market capitalization in dollars |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/market_cap.parquet')
-WHERE ticker = 'AAPL'
-ORDER BY day;
+```bash
+python build.py                    # run only new/pending steps
+python build.py my_table           # rebuild my_table + all downstream
+python build.py --full             # wipe manifest, rebuild everything
+python build.py --list             # show all steps and status
+python build.py --dry-run          # show what would run
+python build.py --include-disabled # also run disabled steps
 ```
 
----
+### Manifest
 
-## insider_trades_v2
+`db/.build_manifest.json` tracks `{step_id: {completed_at, elapsed_seconds}}`. A step runs if its `step_id` is not in the manifest (new or version-bumped), if its target was explicitly requested, or if an upstream dependency was rebuilt. Delete the manifest (or use `--full`) to force a full rebuild.
 
-**File:** `db/insider_trades.parquet` (single file)
+### Checklist for adding a new step
 
-**Sort order:** `ticker` ASC, `trade_date` ASC
+1. Create `db_creation/steps/v{N}_{name}.py` with the next available number
+2. Decorate with `@step("{name}_v1", target="{name}", depends_on=(...))`
+3. Write the build function following the single-file or partitioned pattern above
+4. Add a summary function in `summary.py` and add it to `ALL_TABLES`
+5. Document the table schema in `TABLES.md`
 
-**Data:** SEC Form 4 insider transactions. Only open-market purchases (`P`) and sales (`S`) are included. Only tickers present in the tickers table. Date range filtered to 2000-2026.
+### Checklist for disabling a step
 
-| Column | Type | Description |
-|--------|------|-------------|
-| ticker | VARCHAR | Uppercase ticker symbol |
-| trade_date | DATE | Transaction date |
-| tx_code | VARCHAR | `"P"` (purchase) or `"S"` (sale) |
-| shares | FLOAT | Number of shares transacted |
-| total_value | FLOAT | `shares * pricePerShare` (may be NULL) |
-| acquired_disposed | VARCHAR | `"A"` (acquired) or `"D"` (disposed) |
-| shares_after | FLOAT | Shares owned after transaction (may be NULL) |
-| ownership_type | VARCHAR | `"D"` (direct) or `"I"` (indirect) |
-| is_director | BOOLEAN | Insider is a board director |
-| is_officer | BOOLEAN | Insider is a company officer |
-| is_ten_pct_owner | BOOLEAN | Insider is a 10%+ owner |
-| insider_name | VARCHAR | Name of the reporting insider |
-| insider_cik | VARCHAR | SEC CIK identifier for the insider |
-| officer_title | VARCHAR | Officer title if applicable (may be NULL) |
-
-**Query:**
-```sql
-SELECT * FROM read_parquet('db/insider_trades.parquet')
-WHERE ticker = 'AAPL' AND tx_code = 'P'
-ORDER BY trade_date;
-```
-
----
-
-## Query Efficiency Tips
-
-1. **Hive-partitioned tables (prices, daily_aggs):** Always include `year = ...` or `year BETWEEN ... AND ...` in WHERE clauses. This prunes entire parquet files from disk reads.
-2. **All tables are sorted by `(ticker, ...)`** as the primary sort key. DuckDB uses row-group min/max statistics to skip row groups that don't contain your ticker, so `WHERE ticker = 'X'` is efficient even on single-file tables.
-3. **Use `hive_partitioning=true`** when querying `prices` or `daily_aggs` directories. The `year` column comes from the directory path, not the parquet data itself.
-4. **Glob pattern for partitioned tables:** Use `db/prices/**/data.parquet` (or `db/daily_aggs/**/data.parquet`). Each year partition contains a single `data.parquet` file.
-5. **Multi-resolution price data:** Use `hundred_day_aggs` for coarse scans, `ten_day_aggs` for medium resolution, `daily_aggs` for daily, and `prices` for hourly. This avoids reading billions of hourly rows when daily or block-level granularity suffices.
+1. Add `disabled=True` to the `@step()` decorator
+2. Remove from `ALL_TABLES` in `summary.py` (or leave — it handles "not found" gracefully)
+3. Remove or mark the table as disabled in `TABLES.md`

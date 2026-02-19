@@ -308,17 +308,193 @@ def summarize_insider_trades():
 
 
 # ---------------------------------------------------------------------------
+# Daily Aggs Enriched
+# ---------------------------------------------------------------------------
+
+def summarize_daily_aggs_enriched():
+    d = DB_DIR / "daily_aggs_enriched"
+    if not d.exists():
+        section("DAILY AGGS ENRICHED — not found"); return
+    section("DAILY AGGS ENRICHED")
+    pp = str(d / "**" / "*.parquet")
+    print_schema(f"read_parquet('{pp}', hive_partitioning=true)")
+
+    total = q1(f"SELECT COUNT(*) FROM read_parquet('{pp}', hive_partitioning=true)")
+    tickers = q1(f"SELECT COUNT(DISTINCT ticker) FROM read_parquet('{pp}', hive_partitioning=true)")
+    date_range = q(f"SELECT MIN(day), MAX(day) FROM read_parquet('{pp}', hive_partitioning=true)")[0]
+    print(f"  Rows: {fmt(total)} | Tickers: {fmt(tickers)} | Dates: {date_range[0]} to {date_range[1]}")
+    print(f"  Total size: {file_size(d)}")
+
+    cap_coverage = q(f"""
+        SELECT
+            COUNT(*) FILTER (WHERE cap IS NOT NULL) AS with_cap,
+            COUNT(*) AS total
+        FROM read_parquet('{pp}', hive_partitioning=true)
+    """)[0]
+    pct = (cap_coverage[0] / cap_coverage[1] * 100) if cap_coverage[1] else 0
+    print(f"  Market cap coverage: {fmt(cap_coverage[0])} / {fmt(cap_coverage[1])} rows ({pct:.1f}%)")
+
+    days_per_ticker = q(f"""
+        SELECT MIN(days), MEDIAN(days)::INT, MAX(days)
+        FROM (SELECT COUNT(*) as days FROM read_parquet('{pp}', hive_partitioning=true) GROUP BY ticker)
+    """)[0]
+    print(f"  Days per ticker — min: {fmt(days_per_ticker[0])}, median: {fmt(days_per_ticker[1])}, max: {fmt(days_per_ticker[2])}")
+
+    print(f"\n  {'Year':>6} {'Rows':>14} {'Tickers':>9} {'Size':>8}")
+    print(f"  {'-'*41}")
+    per_year = q(f"""
+        SELECT year, COUNT(*) as rows, COUNT(DISTINCT ticker) as tickers
+        FROM read_parquet('{pp}', hive_partitioning=true)
+        GROUP BY year ORDER BY year
+    """)
+    for yr, rows, tkrs in per_year:
+        yr_dir = d / f"year={yr}"
+        sz = file_size(yr_dir)
+        print(f"  {yr:>6} {fmt(rows):>14} {fmt(tkrs):>9} {sz:>8}")
+
+    sample = q(f"""
+        SELECT ticker, day, open, close, volume, cap, trading_day_num,
+               ROUND(cum_close, 2), ROUND(cum_volume, 0)
+        FROM read_parquet('{pp}', hive_partitioning=true) USING SAMPLE 5
+    """)
+    print(f"\n  Sample rows:")
+    for t, d_, o, c, v, cap, tdn, cc, cv in sample:
+        cap_str = f"${fmt(cap)}" if cap else "N/A"
+        print(f"    {t:>6} | {d_} | O:{o:.2f} C:{c:.2f} | V:{fmt(v)} | cap:{cap_str} | day#{tdn} | cum_c:{fmt(cc)} cum_v:{fmt(cv)}")
+
+
+# ---------------------------------------------------------------------------
+# Insider Purchases
+# ---------------------------------------------------------------------------
+
+def summarize_insider_purchases():
+    d = DB_DIR / "insider_purchases"
+    if not d.exists():
+        section("INSIDER PURCHASES — not found"); return
+    section("INSIDER PURCHASES")
+    pp = str(d / "**" / "*.parquet")
+    print_schema(f"read_parquet('{pp}', hive_partitioning=true)")
+
+    total = q1(f"SELECT COUNT(*) FROM read_parquet('{pp}', hive_partitioning=true)")
+    tickers = q1(f"SELECT COUNT(DISTINCT ticker) FROM read_parquet('{pp}', hive_partitioning=true)")
+    date_range = q(f"SELECT MIN(filing_date), MAX(filing_date) FROM read_parquet('{pp}', hive_partitioning=true)")[0]
+    print(f"  Rows: {fmt(total)} | Tickers: {fmt(tickers)} | Dates: {date_range[0]} to {date_range[1]}")
+    print(f"  Total size: {file_size(d)}")
+
+    insiders = q1(f"SELECT COUNT(DISTINCT insider_cik) FROM read_parquet('{pp}', hive_partitioning=true)")
+    print(f"  Unique insiders: {fmt(insiders)}")
+
+    role = q(f"""
+        SELECT
+            COUNT(*) FILTER (WHERE is_director) AS directors,
+            COUNT(*) FILTER (WHERE is_officer) AS officers,
+            COUNT(*) FILTER (WHERE is_ten_pct_owner) AS ten_pct
+        FROM read_parquet('{pp}', hive_partitioning=true)
+    """)[0]
+    print(f"  Role breakdown — directors: {fmt(role[0])}, officers: {fmt(role[1])}, 10%+ owners: {fmt(role[2])}")
+
+    top = q(f"""
+        SELECT ticker, COUNT(*) as purchases FROM read_parquet('{pp}', hive_partitioning=true)
+        GROUP BY ticker ORDER BY purchases DESC LIMIT 10
+    """)
+    print(f"\n  Top 10 most-purchased tickers:")
+    for t, n in top:
+        print(f"    {t:>6}  {fmt(n)} purchases")
+
+    sample = q(f"""
+        SELECT filing_date, ticker, shares, total_value, insider_name
+        FROM read_parquet('{pp}', hive_partitioning=true) USING SAMPLE 5
+    """)
+    print(f"\n  Sample rows:")
+    for fd, t, s, tv, name in sample:
+        tv_str = f"${fmt(tv)}" if tv else "N/A"
+        name_str = (name[:30] + "...") if name and len(name) > 30 else (name or "N/A")
+        print(f"    {t:>6} | {fd} | {fmt(s)} shares | {tv_str} | {name_str}")
+
+
+# ---------------------------------------------------------------------------
+# Trading Calendar
+# ---------------------------------------------------------------------------
+
+def summarize_trading_calendar():
+    p = DB_DIR / "trading_calendar.parquet"
+    if not p.exists():
+        section("TRADING CALENDAR — not found"); return
+    section("TRADING CALENDAR")
+    print_schema(f"read_parquet('{p}')")
+
+    total = q1(f"SELECT COUNT(*) FROM read_parquet('{p}')")
+    date_range = q(f"SELECT MIN(day), MAX(day) FROM read_parquet('{p}')")[0]
+    print(f"  Trading days: {fmt(total)} | Range: {date_range[0]} to {date_range[1]}")
+    print(f"  File: {file_size(p)}")
+
+    per_year = q(f"""
+        SELECT YEAR(day) AS yr, COUNT(*) AS days
+        FROM read_parquet('{p}')
+        GROUP BY yr ORDER BY yr
+    """)
+    print(f"\n  {'Year':>6} {'Days':>6}")
+    print(f"  {'-'*14}")
+    for yr, days in per_year:
+        print(f"  {yr:>6} {days:>6}")
+
+
+# ---------------------------------------------------------------------------
+# Cap Lookup
+# ---------------------------------------------------------------------------
+
+def summarize_cap_lookup():
+    d = DB_DIR / "cap_lookup"
+    if not d.exists():
+        section("CAP LOOKUP — not found"); return
+    section("CAP LOOKUP")
+    pp = str(d / "**" / "*.parquet")
+    print_schema(f"read_parquet('{pp}', hive_partitioning=true)")
+
+    total = q1(f"SELECT COUNT(*) FROM read_parquet('{pp}', hive_partitioning=true)")
+    tickers = q1(f"SELECT COUNT(DISTINCT ticker) FROM read_parquet('{pp}', hive_partitioning=true)")
+    date_range = q(f"SELECT MIN(day), MAX(day) FROM read_parquet('{pp}', hive_partitioning=true)")[0]
+    print(f"  Rows: {fmt(total)} | Tickers: {fmt(tickers)} | Dates: {date_range[0]} to {date_range[1]}")
+    print(f"  Total size: {file_size(d)}")
+
+    cap_stats = q(f"""
+        SELECT MIN(cap), MEDIAN(cap)::BIGINT, MAX(cap)
+        FROM read_parquet('{pp}', hive_partitioning=true)
+    """)[0]
+    print(f"  Cap range — min: ${fmt(cap_stats[0])}  median: ${fmt(cap_stats[1])}  max: ${fmt(cap_stats[2])}")
+
+    print(f"\n  {'Year':>6} {'Rows':>14} {'Tickers':>9} {'Size':>8}")
+    print(f"  {'-'*41}")
+    per_year = q(f"""
+        SELECT year, COUNT(*) as rows, COUNT(DISTINCT ticker) as tickers
+        FROM read_parquet('{pp}', hive_partitioning=true)
+        GROUP BY year ORDER BY year
+    """)
+    for yr, rows, tkrs in per_year:
+        yr_dir = d / f"year={yr}"
+        sz = file_size(yr_dir)
+        print(f"  {yr:>6} {fmt(rows):>14} {fmt(tkrs):>9} {sz:>8}")
+
+    sample = q(f"""
+        SELECT day, ticker, cap, close, trading_day_num, ROUND(cum_close, 2)
+        FROM read_parquet('{pp}', hive_partitioning=true) USING SAMPLE 5
+    """)
+    print(f"\n  Sample rows:")
+    for d_, t, cap, c, tdn, cc in sample:
+        print(f"    {d_} | {t:>6} | cap:${fmt(cap)} | C:{c:.2f} | day#{tdn} | cum_c:{fmt(cc)}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 ALL_TABLES = {
     "tickers": summarize_tickers,
     "prices": summarize_prices,
-    "daily_aggs": summarize_daily_aggs,
-    "ten_day_aggs": lambda: summarize_nday_agg("10-DAY AGGS", "ten_day_aggs.parquet", 10),
-    "hundred_day_aggs": lambda: summarize_nday_agg("100-DAY AGGS", "hundred_day_aggs.parquet", 100),
-    "market_cap": summarize_market_cap,
-    "insider_trades": summarize_insider_trades,
+    "daily_aggs_enriched": summarize_daily_aggs_enriched,
+    "cap_lookup": summarize_cap_lookup,
+    "insider_purchases": summarize_insider_purchases,
+    "trading_calendar": summarize_trading_calendar,
 }
 
 

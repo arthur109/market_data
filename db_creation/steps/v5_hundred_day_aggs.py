@@ -5,7 +5,7 @@ from pathlib import Path
 from build_common import OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
 
-@step("hundred_day_aggs_v1", target="hundred_day_aggs", depends_on=("daily_aggs",))
+@step("hundred_day_aggs_v1", target="hundred_day_aggs", depends_on=("daily_aggs",), disabled=True)
 def build_hundred_day_aggs(con):
     """Aggregate daily data into 100-trading-day blocks."""
     daily_path = str(OUTPUT_DIR / "daily_aggs" / "**" / "*.parquet")

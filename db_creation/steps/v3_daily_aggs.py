@@ -6,7 +6,7 @@ from pathlib import Path
 from build_common import OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
 
-@step("daily_aggs_v2", target="daily_aggs", depends_on=("prices",))
+@step("daily_aggs_v2", target="daily_aggs", depends_on=("prices",), disabled=True)
 def build_daily_aggs(con):
     """Aggregate hourly prices into daily OHLCV + component sums, partitioned by year."""
     prices_pattern = str(OUTPUT_DIR / "prices" / "**" / "*.parquet")

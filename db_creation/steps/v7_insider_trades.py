@@ -5,7 +5,7 @@ from pathlib import Path
 from build_common import INSIDER_TRADES_DIR, OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
 
-@step("insider_trades_v2", target="insider_trades", depends_on=("tickers",))
+@step("insider_trades_v2", target="insider_trades", depends_on=("tickers",), disabled=True)
 def build_insider_trades(con):
     """Read JSONL.GZ insider trade files via DuckDB's native JSON reader + UNNEST."""
     dest = OUTPUT_DIR / "insider_trades.parquet"

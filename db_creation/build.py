@@ -16,9 +16,11 @@ Usage:
 """
 
 import argparse
+import shutil
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import steps  # noqa: F401 — triggers @step registration via auto-import
 
@@ -91,6 +93,7 @@ def run_build(requested_targets, full_rebuild=False, dry_run=False,
 
     if not steps_to_run:
         log("Nothing to do — all steps up to date.")
+        install_db_docs()
         print()
         run_summary()
         return True
@@ -127,9 +130,30 @@ def run_build(requested_targets, full_rebuild=False, dry_run=False,
         log(f"  Done in {elapsed:.1f}s")
 
     log("Build complete.")
+    install_db_docs()
     print()
     run_summary()
     return True
+
+
+def install_db_docs():
+    """Copy TABLES.md and generate CLAUDE.md into the db/ directory."""
+    project_dir = Path(__file__).resolve().parent.parent
+    tables_src = project_dir / "TABLES.md"
+
+    if tables_src.exists():
+        shutil.copy2(tables_src, OUTPUT_DIR / "TABLES.md")
+
+    claude_md = OUTPUT_DIR / "CLAUDE.md"
+    claude_md.write_text(
+        "# Market Data Database\n"
+        "\n"
+        "This directory contains the built parquet database.\n"
+        "\n"
+        "For table schemas, query patterns, and usage documentation, "
+        "see [TABLES.md](TABLES.md).\n"
+    )
+    log("Installed TABLES.md and CLAUDE.md into db/")
 
 
 def list_steps():
