@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="Python 3.13 (minecraft_wood_vision_clean)" />
+  </component>
+  <component name="GithubDefaultAccount">
+    <option name="defaultAccountId" value="8c536f72-8be6-4f36-a857-5917a1ec6fae" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.13 (minecraft_wood_vision_clean)" project-jdk-type="Python SDK" />
+</project>
