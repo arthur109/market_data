@@ -23,8 +23,8 @@ from datetime import datetime
 import steps  # noqa: F401 — triggers @step registration via auto-import
 
 from build_common import (
-    OUTPUT_DIR, _steps, cleanup_stale_artifacts, get_downstream_targets,
-    load_manifest, log, make_connection, save_manifest,
+    OUTPUT_DIR, _disabled_steps, _steps, cleanup_stale_artifacts,
+    get_downstream_targets, load_manifest, log, make_connection, save_manifest,
 )
 from summary import run_summary
 
@@ -34,13 +34,16 @@ from summary import run_summary
 # ===========================================================================
 
 
-def determine_steps_to_run(manifest, requested_targets, full_rebuild):
+def determine_steps_to_run(manifest, requested_targets, full_rebuild,
+                           include_disabled=False):
     """
     Walk the step list and decide which steps to run.
     Returns list of (step_id, target, func) tuples.
     """
+    skip = set() if include_disabled else _disabled_steps
+
     if full_rebuild:
-        return [(sid, tgt, fn) for sid, tgt, _, fn in _steps]
+        return [(sid, tgt, fn) for sid, tgt, _, fn in _steps if sid not in skip]
 
     # Determine targets that need rebuilding due to explicit request
     force_targets = set()
@@ -52,6 +55,9 @@ def determine_steps_to_run(manifest, requested_targets, full_rebuild):
     to_run = []
 
     for step_id, target, depends_on, func in _steps:
+        if step_id in skip:
+            continue
+
         should_run = False
 
         # New step not in manifest
@@ -73,13 +79,15 @@ def determine_steps_to_run(manifest, requested_targets, full_rebuild):
     return to_run
 
 
-def run_build(requested_targets, full_rebuild=False, dry_run=False):
+def run_build(requested_targets, full_rebuild=False, dry_run=False,
+              include_disabled=False):
     """Main build execution."""
     cleanup_stale_artifacts()
 
     manifest = {} if full_rebuild else load_manifest()
 
-    steps_to_run = determine_steps_to_run(manifest, requested_targets, full_rebuild)
+    steps_to_run = determine_steps_to_run(manifest, requested_targets,
+                                          full_rebuild, include_disabled)
 
     if not steps_to_run:
         log("Nothing to do — all steps up to date.")
@@ -128,7 +136,9 @@ def list_steps():
     """Show all steps and their status."""
     manifest = load_manifest()
     for step_id, target, depends_on, _ in _steps:
-        if step_id in manifest:
+        if step_id in _disabled_steps:
+            status = "DISABLED"
+        elif step_id in manifest:
             info = manifest[step_id]
             completed = info.get("completed_at", "?")
             elapsed = info.get("elapsed_seconds", "?")
@@ -166,6 +176,10 @@ def main():
         "--dry-run", action="store_true",
         help="Show what would run without actually running.",
     )
+    parser.add_argument(
+        "--include-disabled", action="store_true",
+        help="Include steps marked as disabled=True in the build.",
+    )
     args = parser.parse_args()
 
     if args.list_steps:
@@ -174,14 +188,18 @@ def main():
 
     # Validate target names
     known_targets = {tgt for _, tgt, _, _ in _steps}
+    disabled_targets = {tgt for sid, tgt, _, _ in _steps if sid in _disabled_steps}
     for t in args.targets:
         if t not in known_targets:
             sys.exit(f"Unknown target: '{t}'. Known targets: {', '.join(sorted(known_targets))}")
+        if t in disabled_targets and not args.include_disabled:
+            sys.exit(f"Target '{t}' is disabled. Use --include-disabled to build it anyway.")
 
     success = run_build(
         requested_targets=args.targets,
         full_rebuild=args.full,
         dry_run=args.dry_run,
+        include_disabled=args.include_disabled,
     )
     if not success:
         sys.exit(1)

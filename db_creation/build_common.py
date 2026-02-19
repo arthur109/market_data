@@ -60,13 +60,20 @@ def log_progress(current, total, msg):
 
 _steps = []  # ordered list of (step_id, target, depends_on, func)
 _target_to_steps = {}  # target -> [step_id, ...]
+_disabled_steps = set()  # step_ids that are registered but skipped
 
 
-def step(step_id, target, depends_on=()):
-    """Decorator to register a build step."""
+def step(step_id, target, depends_on=(), disabled=False):
+    """Decorator to register a build step.
+
+    Set disabled=True to keep the step registered (visible in --list)
+    but skip it during builds unless --include-disabled is passed.
+    """
     def decorator(func):
         _steps.append((step_id, target, depends_on, func))
         _target_to_steps.setdefault(target, []).append(step_id)
+        if disabled:
+            _disabled_steps.add(step_id)
         return func
     return decorator
 
