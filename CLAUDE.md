@@ -2,7 +2,7 @@
 
 Parquet-based market database in `db/`. Built by `db_creation/`.
 
-**For table schemas, query patterns, and database documentation, see [`TABLES.md`](TABLES.md).** A copy is also placed in `db/TABLES.md` on each build.
+**For table schemas, query patterns, and database documentation, see [`TABLES.md`](TABLES.md).** A copy is also placed in `db/TABLES.md` on each build. **Whenever you edit the resulting tables by modifying the steps, please update TABLES.md so it always remains accurate.**
 
 ---
 
@@ -18,15 +18,15 @@ db_creation/
 ├── build_common.py       # Constants, @step decorator, helpers
 ├── summary.py            # Post-build data preview (ALL_TABLES dict must match active tables)
 └── steps/
-    ├── __init__.py       # Auto-imports v*.py in numeric order
-    ├── v1_tickers.py
-    ├── v2_prices.py
-    └── ...               # v{N}_{name}.py — N determines execution order
+    ├── __init__.py       # Auto-imports step_*.py alphabetically
+    ├── step_tickers.py
+    ├── step_prices.py
+    └── ...               # step_{name}.py — execution order is by depends_on
 ```
 
 ### The `@step` decorator
 
-Every step is a function decorated with `@step()` in a `v*.py` file under `steps/`. The decorator registers the step; `__init__.py` auto-imports all `v*.py` files sorted numerically (v1, v2, ..., v10, v11).
+Every step is a function decorated with `@step()` in a `step_*.py` file under `steps/`. The decorator registers the step; `__init__.py` auto-imports all `step_*.py` files alphabetically. After import, `finalize_step_order()` topologically sorts steps by `depends_on`, so **execution order is determined by the dependency graph, not by filename**.
 
 ```python
 from build_common import OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
@@ -46,7 +46,7 @@ The function receives a DuckDB in-memory connection (`con`) with 12GB memory lim
 
 ### Naming convention
 
-Files: `v{N}_{target_name}.py` — N is a positive integer that determines import/execution order. **Use the next available number** for new steps. Gaps are fine.
+Files: `step_{target_name}.py` — one file per step. Execution order is determined by `depends_on` (topological sort), not by filename.
 
 Step IDs: `{target}_v{version}` — bump version when logic changes so the manifest detects it as new.
 
@@ -88,6 +88,10 @@ else:
 ```
 
 Partitioned files must be named `data.parquet` (one per `year=YYYY/` directory). Query pattern: `read_parquet('db/my_table/**/data.parquet', hive_partitioning=true)`.
+
+### Temp file cleanup
+
+Any file or directory under `db/` ending in `.tmp` is automatically deleted by `cleanup_stale_artifacts()` at the start of each build. Use the `.tmp` suffix for intermediate files that should not survive a failed run (e.g. `data.parquet.tmp`, `my_table.parquet.tmp`). You don't need to clean them up manually — just name them `*.tmp` and the build system handles it.
 
 ### Using intermediate data
 
@@ -135,7 +139,7 @@ python build.py --include-disabled # also run disabled steps
 
 ### Checklist for adding a new step
 
-1. Create `db_creation/steps/v{N}_{name}.py` with the next available number
+1. Create `db_creation/steps/step_{name}.py`
 2. Decorate with `@step("{name}_v1", target="{name}", depends_on=(...))`
 3. Write the build function following the single-file or partitioned pattern above
 4. Add a summary function in `summary.py` and add it to `ALL_TABLES`

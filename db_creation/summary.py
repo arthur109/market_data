@@ -125,12 +125,12 @@ def summarize_prices():
         print(f"  {yr:>6} {fmt(rows):>14} {fmt(tkrs):>9} {sz:>8} {fmt(rpt):>12}")
 
     sample = q(f"""
-        SELECT ticker, ts, open, high, low, close, volume
+        SELECT ticker, ts, open, high, low, close, volume, trading_day_num
         FROM read_parquet('{pp}', hive_partitioning=true) USING SAMPLE 5
     """)
     print(f"\n  Sample rows:")
-    for t, ts, o, h, l, c, v in sample:
-        print(f"    {t:>6} | {ts} | O:{o:.2f} H:{h:.2f} L:{l:.2f} C:{c:.2f} | V:{fmt(v)}")
+    for t, ts, o, h, l, c, v, tdn in sample:
+        print(f"    {t:>6} | {ts} | O:{o:.2f} H:{h:.2f} L:{l:.2f} C:{c:.2f} | V:{fmt(v)} | tdn:{tdn}")
 
 
 # ---------------------------------------------------------------------------
@@ -402,14 +402,15 @@ def summarize_insider_purchases():
         print(f"    {t:>6}  {fmt(n)} purchases")
 
     sample = q(f"""
-        SELECT filing_date, ticker, shares, total_value, insider_name
+        SELECT filing_date, ticker, shares, total_value, insider_name, trading_day_num
         FROM read_parquet('{pp}', hive_partitioning=true) USING SAMPLE 5
     """)
     print(f"\n  Sample rows:")
-    for fd, t, s, tv, name in sample:
+    for fd, t, s, tv, name, tdn in sample:
         tv_str = f"${fmt(tv)}" if tv else "N/A"
         name_str = (name[:30] + "...") if name and len(name) > 30 else (name or "N/A")
-        print(f"    {t:>6} | {fd} | {fmt(s)} shares | {tv_str} | {name_str}")
+        tdn_str = fmt(tdn) if tdn is not None else "N/A"
+        print(f"    {t:>6} | {fd} | {fmt(s)} shares | {tv_str} | tdn:{tdn_str} | {name_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -425,18 +426,21 @@ def summarize_trading_calendar():
 
     total = q1(f"SELECT COUNT(*) FROM read_parquet('{p}')")
     date_range = q(f"SELECT MIN(day), MAX(day) FROM read_parquet('{p}')")[0]
+    tdn_range = q(f"SELECT MIN(trading_day_num), MAX(trading_day_num) FROM read_parquet('{p}')")[0]
     print(f"  Trading days: {fmt(total)} | Range: {date_range[0]} to {date_range[1]}")
+    print(f"  trading_day_num range: {tdn_range[0]} to {tdn_range[1]}")
     print(f"  File: {file_size(p)}")
 
     per_year = q(f"""
-        SELECT YEAR(day) AS yr, COUNT(*) AS days
+        SELECT YEAR(day) AS yr, COUNT(*) AS days,
+               MIN(trading_day_num) AS min_tdn, MAX(trading_day_num) AS max_tdn
         FROM read_parquet('{p}')
         GROUP BY yr ORDER BY yr
     """)
-    print(f"\n  {'Year':>6} {'Days':>6}")
-    print(f"  {'-'*14}")
-    for yr, days in per_year:
-        print(f"  {yr:>6} {days:>6}")
+    print(f"\n  {'Year':>6} {'Days':>6} {'TDN range':>14}")
+    print(f"  {'-'*30}")
+    for yr, days, min_tdn, max_tdn in per_year:
+        print(f"  {yr:>6} {days:>6} {min_tdn:>6}-{max_tdn:<6}")
 
 
 # ---------------------------------------------------------------------------

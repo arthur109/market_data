@@ -1,4 +1,4 @@
-"""Step 11: Build cap_lookup — daily_aggs_enriched sorted by (day, ticker) for cap-range scans."""
+"""Step 12: Build cap_lookup — daily_aggs_enriched sorted by (trading_day_num, ticker) for cap-range scans."""
 
 import shutil
 from pathlib import Path
@@ -6,9 +6,9 @@ from pathlib import Path
 from build_common import OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet
 
 
-@step("cap_lookup_v1", target="cap_lookup", depends_on=("daily_aggs_enriched",))
+@step("cap_lookup_v2", target="cap_lookup", depends_on=("daily_aggs_enriched",))
 def build_cap_lookup(con):
-    """Side table with rows that have market cap, sorted by (day, ticker) for fast day+cap queries."""
+    """Side table with rows that have market cap, sorted by (trading_day_num, ticker) for fast day+cap queries."""
     enriched_pattern = str(OUTPUT_DIR / "daily_aggs_enriched" / "**" / "*.parquet")
     lookup_dir = OUTPUT_DIR / "cap_lookup"
     building_dir = OUTPUT_DIR / "cap_lookup_building"
@@ -46,7 +46,7 @@ def build_cap_lookup(con):
                 SELECT day, ticker, cap, close, trading_day_num, cum_close
                 FROM _cap_lookup
                 WHERE YEAR(day) = {year}
-                ORDER BY day, ticker
+                ORDER BY trading_day_num, ticker
             ) TO '{out_path}' ({PARQUET_SETTINGS})
         """)
 

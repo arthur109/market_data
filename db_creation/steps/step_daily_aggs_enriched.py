@@ -8,12 +8,13 @@ from build_common import (
 )
 
 
-@step("daily_aggs_enriched_v1", target="daily_aggs_enriched", depends_on=("prices",))
+@step("daily_aggs_enriched_v2", target="daily_aggs_enriched", depends_on=("prices", "trading_calendar"))
 def build_daily_aggs_enriched(con):
-    """Daily OHLCV enriched with market cap, trading day index, and cumulative sums."""
+    """Daily OHLCV enriched with market cap, global trading day number, and cumulative sums."""
     prices_pattern = str(OUTPUT_DIR / "prices" / "**" / "*.parquet")
     csv_pattern = str(MARKET_CAP_DIR / "*.csv")
     tickers_path = str(OUTPUT_DIR / "tickers.parquet")
+    calendar_path = str(OUTPUT_DIR / "trading_calendar.parquet")
     enriched_dir = OUTPUT_DIR / "daily_aggs_enriched"
     building_dir = OUTPUT_DIR / "daily_aggs_enriched_building"
 
@@ -63,9 +64,9 @@ def build_daily_aggs_enriched(con):
     mc_count = con.execute("SELECT COUNT(*) FROM _market_cap").fetchone()[0]
     log(f"  {mc_count:,} market cap rows")
 
-    log("Enriching daily aggs with market cap and cumulative sums...")
+    log("Enriching daily aggs with market cap, global trading_day_num, and cumulative sums...")
 
-    con.execute("""
+    con.execute(f"""
         CREATE TABLE _enriched AS
         SELECT
             d.ticker,
@@ -76,12 +77,14 @@ def build_daily_aggs_enriched(con):
             d.close,
             d.volume,
             mc.cap,
-            ROW_NUMBER() OVER w AS trading_day_num,
+            cal.trading_day_num,
             SUM(d.close)  OVER w AS cum_close,
             SUM(d.high)   OVER w AS cum_high,
             SUM(d.low)    OVER w AS cum_low,
             SUM(d.volume::DOUBLE) OVER w AS cum_volume
         FROM _daily d
+        INNER JOIN read_parquet('{calendar_path}') cal
+          ON cal.day = d.day
         LEFT JOIN _market_cap mc
           ON mc.ticker = d.ticker AND mc.day = d.day
         WINDOW w AS (PARTITION BY d.ticker ORDER BY d.day)
@@ -113,7 +116,7 @@ def build_daily_aggs_enriched(con):
                     trading_day_num, cum_close, cum_high, cum_low, cum_volume
                 FROM _enriched
                 WHERE YEAR(day) = {year}
-                ORDER BY ticker, day
+                ORDER BY trading_day_num, ticker
             ) TO '{out_path}' ({PARQUET_SETTINGS})
         """)
 

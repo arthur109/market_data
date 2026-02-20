@@ -15,12 +15,14 @@ from build_common import (
 )
 
 
-@step("prices_v2", target="prices", depends_on=("tickers",))
+@step("prices_v4", target="prices", depends_on=("tickers",))
 def build_prices(con):
     """
-    Two-pass approach:
+    Three-pass approach:
     Pass 1: Extract each ZIP, read CSVs, write temp parquet partitioned by year
     Pass 2: For each year, merge fragments, deduplicate, sort, write final
+    Pass 3: Compute global trading_day_num, write trading_calendar.parquet,
+            enrich each year partition with trading_day_num
     """
     prices_dir = OUTPUT_DIR / "prices"
     building_dir = OUTPUT_DIR / "prices_building"
@@ -179,6 +181,63 @@ def build_prices(con):
 
     # Clean up temp fragments
     shutil.rmtree(temp_fragments_dir)
+
+    # Pass 3: Compute global trading_day_num and write trading_calendar.parquet
+    log("Pass 3: Computing global trading_day_num...")
+
+    prices_pattern = str(prices_dir / "**" / "*.parquet")
+    calendar_dest = OUTPUT_DIR / "trading_calendar.parquet"
+    calendar_tmp = Path(str(calendar_dest) + ".tmp")
+
+    ccon = duckdb.connect(":memory:")
+    ccon.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    ccon.execute(f"SET threads = {DUCKDB_THREADS}")
+
+    ccon.execute(f"""
+        CREATE TABLE _calendar AS
+        SELECT
+            day,
+            ROW_NUMBER() OVER (ORDER BY day)::SMALLINT AS trading_day_num
+        FROM (
+            SELECT DISTINCT CAST(ts AS DATE) AS day
+            FROM read_parquet('{prices_pattern}', hive_partitioning=true)
+        )
+    """)
+
+    cal_count = ccon.execute("SELECT COUNT(*) FROM _calendar").fetchone()[0]
+    cal_range = ccon.execute("SELECT MIN(day), MAX(day) FROM _calendar").fetchone()
+    log(f"  {cal_count:,} trading days ({cal_range[0]} to {cal_range[1]})")
+
+    ccon.execute(f"""
+        COPY (SELECT trading_day_num, day FROM _calendar ORDER BY trading_day_num)
+        TO '{calendar_tmp}' ({PARQUET_SETTINGS})
+    """)
+    calendar_tmp.rename(calendar_dest)
+    verify_parquet(str(calendar_dest))
+    log(f"  Wrote trading_calendar.parquet")
+
+    # Enrich each year partition with trading_day_num
+    log("  Enriching price partitions with trading_day_num...")
+    year_dirs = sorted(prices_dir.glob("year=*"))
+    for year_dir in year_dirs:
+        year = year_dir.name.split("=")[1]
+        data_path = year_dir / "data.parquet"
+        tmp_path = year_dir / "data.parquet.tmp"
+
+        ccon.execute(f"""
+            COPY (
+                SELECT p.ticker, p.ts, p.open, p.high, p.low, p.close, p.volume,
+                       c.trading_day_num
+                FROM read_parquet('{data_path}') p
+                JOIN _calendar c ON CAST(p.ts AS DATE) = c.day
+                ORDER BY p.ticker, p.ts
+            ) TO '{tmp_path}' ({PARQUET_SETTINGS})
+        """)
+        tmp_path.rename(data_path)
+        log(f"    year={year}: enriched")
+
+    ccon.execute("DROP TABLE _calendar")
+    ccon.close()
 
     total = verify_parquet(str(prices_dir / "**" / "*.parquet"))
     log(f"  Wrote {total:,} total price rows")

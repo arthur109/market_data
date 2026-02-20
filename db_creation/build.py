@@ -26,8 +26,11 @@ import steps  # noqa: F401 — triggers @step registration via auto-import
 
 from build_common import (
     OUTPUT_DIR, _disabled_steps, _steps, cleanup_stale_artifacts,
-    get_downstream_targets, load_manifest, log, make_connection, save_manifest,
+    finalize_step_order, get_downstream_targets, load_manifest, log,
+    make_connection, save_manifest,
 )
+
+finalize_step_order()
 from summary import run_summary
 
 

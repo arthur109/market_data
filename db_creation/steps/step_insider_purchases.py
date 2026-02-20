@@ -8,10 +8,11 @@ from build_common import (
 )
 
 
-@step("insider_purchases_v1", target="insider_purchases", depends_on=("tickers",))
+@step("insider_purchases_v2", target="insider_purchases", depends_on=("tickers", "trading_calendar"))
 def build_insider_purchases(con):
     """SEC Form 4 open-market purchases, partitioned by filing date year."""
     tickers_path = str(OUTPUT_DIR / "tickers.parquet")
+    calendar_path = str(OUTPUT_DIR / "trading_calendar.parquet")
     jsonl_pattern = str(INSIDER_TRADES_DIR / "**" / "*.jsonl.gz")
     purchases_dir = OUTPUT_DIR / "insider_purchases"
     building_dir = OUTPUT_DIR / "insider_purchases_building"
@@ -54,9 +55,26 @@ def build_insider_purchases(con):
     total = con.execute("SELECT COUNT(*) FROM _purchases").fetchone()[0]
     log(f"  {total:,} purchase rows")
 
+    log("Adding trading_day_num via ASOF join with trading calendar...")
+
+    con.execute(f"""
+        CREATE TABLE _purchases_tdn AS
+        SELECT
+            p.*,
+            cal.trading_day_num
+        FROM _purchases p
+        ASOF JOIN read_parquet('{calendar_path}') cal
+          ON p.filing_date <= cal.day
+    """)
+
+    con.execute("DROP TABLE _purchases")
+
+    matched = con.execute("SELECT COUNT(*) FROM _purchases_tdn WHERE trading_day_num IS NOT NULL").fetchone()[0]
+    log(f"  {matched:,} / {total:,} rows matched to trading days")
+
     # Get distinct years from filing_date
     years = [r[0] for r in con.execute(
-        "SELECT DISTINCT YEAR(filing_date) AS yr FROM _purchases ORDER BY yr"
+        "SELECT DISTINCT YEAR(filing_date) AS yr FROM _purchases_tdn ORDER BY yr"
     ).fetchall()]
 
     total_years = len(years)
@@ -72,10 +90,10 @@ def build_insider_purchases(con):
                 SELECT
                     filing_date, ticker, insider_cik, total_value, shares,
                     is_director, is_officer, is_ten_pct_owner,
-                    officer_title, insider_name
-                FROM _purchases
+                    officer_title, insider_name, trading_day_num
+                FROM _purchases_tdn
                 WHERE YEAR(filing_date) = {year}
-                ORDER BY filing_date, ticker
+                ORDER BY trading_day_num, ticker
             ) TO '{out_path}' ({PARQUET_SETTINGS})
         """)
 
@@ -83,7 +101,7 @@ def build_insider_purchases(con):
         total_rows += count
         log(f"  [{yr_idx + 1}/{total_years}] year={year}: {count:,} rows")
 
-    con.execute("DROP TABLE _purchases")
+    con.execute("DROP TABLE _purchases_tdn")
 
     # Atomic swap
     if purchases_dir.exists():
