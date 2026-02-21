@@ -1,30 +1,32 @@
 """Step 8: Build daily_aggs_enriched — daily OHLCV with market cap and cumulative sums."""
 
-import shutil
-from pathlib import Path
+import sqlite3
 
 from build_common import (
-    MARKET_CAP_DIR, OUTPUT_DIR, PARQUET_SETTINGS, log, step, verify_parquet,
+    MARKET_CAP_DIR, OUTPUT_DIR,
+    create_indexes, create_table, get_year_dbs, install_duckdb_sqlite,
+    log, optimize_db, step, verify_table,
 )
 
 
 @step("daily_aggs_enriched_v3", target="daily_aggs_enriched", depends_on=("prices", "trading_calendar"))
 def build_daily_aggs_enriched(con):
     """Daily OHLCV enriched with market cap, global trading day number, and cumulative sums."""
-    prices_pattern = str(OUTPUT_DIR / "prices" / "**" / "*.parquet")
     csv_pattern = str(MARKET_CAP_DIR / "*.csv")
-    tickers_path = str(OUTPUT_DIR / "tickers.parquet")
-    calendar_path = str(OUTPUT_DIR / "trading_calendar.parquet")
-    enriched_dir = OUTPUT_DIR / "daily_aggs_enriched"
-    building_dir = OUTPUT_DIR / "daily_aggs_enriched_building"
+    tickers_db = str(OUTPUT_DIR / "staging_tickers.db")
+    calendar_db = str(OUTPUT_DIR / "staging_calendar.db")
+    year_dbs = get_year_dbs()
 
-    if building_dir.exists():
-        shutil.rmtree(building_dir)
-    building_dir.mkdir(parents=True)
+    install_duckdb_sqlite(con)
+
+    # Load all prices from year dbs via sqlite_scan (ts is epoch seconds)
+    log("Loading prices from year SQLite databases...")
+    parts = [f"SELECT ticker, to_timestamp(ts) AS ts, open, high, low, close, volume, trading_day_num FROM sqlite_scan('{p}', 'prices')" for _, p in year_dbs]
+    con.execute(f"CREATE TABLE _all_prices AS {' UNION ALL '.join(parts)}")
 
     log("Aggregating hourly prices into daily OHLCV...")
 
-    con.execute(f"""
+    con.execute("""
         CREATE TABLE _daily AS
         SELECT
             ticker,
@@ -34,9 +36,11 @@ def build_daily_aggs_enriched(con):
             MIN(low) AS low,
             LAST(close ORDER BY ts) AS close,
             SUM(volume)::BIGINT AS volume
-        FROM read_parquet('{prices_pattern}', hive_partitioning=true)
+        FROM _all_prices
         GROUP BY ticker, CAST(ts AS DATE)
     """)
+
+    con.execute("DROP TABLE _all_prices")
 
     daily_count = con.execute("SELECT COUNT(*) FROM _daily").fetchone()[0]
     log(f"  {daily_count:,} daily rows")
@@ -56,7 +60,7 @@ def build_daily_aggs_enriched(con):
             filename=true
         )
         WHERE ticker != ''
-          AND ticker IN (SELECT ticker FROM read_parquet('{tickers_path}'))
+          AND ticker IN (SELECT ticker FROM sqlite_scan('{tickers_db}', 'tickers'))
           AND cap > 0
           AND cap < 20000000000000
     """)
@@ -83,8 +87,8 @@ def build_daily_aggs_enriched(con):
             SUM(d.low)    OVER w AS cum_low,
             SUM(d.volume::DOUBLE) OVER w AS cum_volume
         FROM _daily d
-        INNER JOIN read_parquet('{calendar_path}') cal
-          ON cal.day = d.day
+        INNER JOIN sqlite_scan('{calendar_db}', 'trading_calendar') cal
+          ON cal.day = strftime(d.day, '%Y%m%d')::INTEGER
         LEFT JOIN _market_cap mc
           ON mc.ticker = d.ticker AND mc.day = d.day
         WINDOW w AS (PARTITION BY d.ticker ORDER BY d.day)
@@ -105,34 +109,33 @@ def build_daily_aggs_enriched(con):
     total_rows = 0
 
     for yr_idx, year in enumerate(years):
-        out_dir = building_dir / f"year={year}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "data.parquet"
+        rows = con.execute(f"""
+            SELECT
+                ticker, strftime(day, '%Y%m%d')::INTEGER, open, high, low, close, volume::BIGINT, cap::BIGINT,
+                trading_day_num, cum_close, cum_high, cum_low, cum_volume
+            FROM _enriched
+            WHERE YEAR(day) = {year}
+            ORDER BY ticker, trading_day_num
+        """).fetchall()
 
-        con.execute(f"""
-            COPY (
-                SELECT
-                    ticker, day, open, high, low, close, volume, cap,
-                    trading_day_num, cum_close, cum_high, cum_low, cum_volume
-                FROM _enriched
-                WHERE YEAR(day) = {year}
-                ORDER BY ticker, trading_day_num
-            ) TO '{out_path}' ({PARQUET_SETTINGS})
-        """)
+        db_path = OUTPUT_DIR / f"{year}.db"
+        sconn = sqlite3.connect(str(db_path))
+        sconn.execute("PRAGMA journal_mode = WAL")
+        sconn.execute("PRAGMA foreign_keys = ON")
+        create_table(sconn, "daily_aggs_enriched", with_indexes=False)
+        sconn.executemany(
+            "INSERT INTO daily_aggs_enriched VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        create_indexes(sconn, "daily_aggs_enriched")
+        sconn.commit()
+        sconn.close()
 
-        count = verify_parquet(str(out_path))
+        optimize_db(str(db_path))
+        count = verify_table(str(db_path), "daily_aggs_enriched")
         total_rows += count
-        log(f"  [{yr_idx + 1}/{total_years}] year={year}: {count:,} rows")
+        log(f"  [{yr_idx + 1}/{total_years}] {year}.db: {count:,} rows")
 
     con.execute("DROP TABLE _enriched")
-
-    # Atomic swap
-    if enriched_dir.exists():
-        stale = Path(str(enriched_dir) + "_old")
-        enriched_dir.rename(stale)
-        building_dir.rename(enriched_dir)
-        shutil.rmtree(stale)
-    else:
-        building_dir.rename(enriched_dir)
 
     log(f"  Wrote {total_rows:,} total daily_aggs_enriched rows")

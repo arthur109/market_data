@@ -1,5 +1,6 @@
 # Data directories — large files, not tracked in git
 db/
+db_sql/
 data_sources/*/data/
 
 # Temp directories — non-essential working files

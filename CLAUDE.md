@@ -1,22 +1,32 @@
 # Market Data
 
-Parquet-based market database in `db/`. Built by `db_creation/`.
+Two database variants built from the same raw sources in `data_sources/`:
 
-**For table schemas, query patterns, and database documentation, see [`TABLES.md`](TABLES.md).** A copy is also placed in `db/TABLES.md` on each build. **Whenever you edit the resulting tables by modifying the steps, please update TABLES.md so it always remains accurate.**
+| Variant | Build system | Output | Docs |
+|---------|-------------|--------|------|
+| **Parquet/DuckDB** | `db_creation/` | `db/` | `db_creation/db_docs/` |
+| **SQLite** | `db_creation_sql/` | `db_sql/` | `db_creation_sql/db_docs/` |
+
+Each `db_docs/` folder contains `TABLES.md` (schemas, query patterns) and `CLAUDE.md` for the output database. These are copied into `db/` and `db_sql/` on each build.
+
+**Whenever you edit the resulting tables by modifying the steps, update the corresponding `db_docs/TABLES.md` so it always remains accurate.**
 
 ---
 
 ## Build System Reference
 
-All build code lives in `db_creation/`. Steps produce the parquet files in `db/`.
+Both build systems share the same architecture. All build code lives in `db_creation/` (Parquet) or `db_creation_sql/` (SQLite). Steps produce the output files.
 
 ### File layout
 
 ```
-db_creation/
+db_creation/                    # (same structure for db_creation_sql/)
 ├── build.py              # CLI entry point
 ├── build_common.py       # Constants, @step decorator, helpers
 ├── summary.py            # Post-build data preview (ALL_TABLES dict must match active tables)
+├── db_docs/              # TABLES.md + CLAUDE.md → copied to output dir on build
+│   ├── CLAUDE.md
+│   └── TABLES.md
 └── steps/
     ├── __init__.py       # Auto-imports step_*.py alphabetically
     ├── step_tickers.py
@@ -50,7 +60,7 @@ Files: `step_{target_name}.py` — one file per step. Execution order is determi
 
 Step IDs: `{target}_v{version}` — bump version when logic changes so the manifest detects it as new.
 
-### Output patterns
+### Output patterns (Parquet variant)
 
 **Single file** (small tables):
 ```python
@@ -91,11 +101,11 @@ Partitioned files must be named `data.parquet` (one per `year=YYYY/` directory).
 
 ### Temp file cleanup
 
-Any file or directory under `db/` ending in `.tmp` is automatically deleted by `cleanup_stale_artifacts()` at the start of each build. Use the `.tmp` suffix for intermediate files that should not survive a failed run (e.g. `data.parquet.tmp`, `my_table.parquet.tmp`). You don't need to clean them up manually — just name them `*.tmp` and the build system handles it.
+Any file or directory under the output dir ending in `.tmp` is automatically deleted by `cleanup_stale_artifacts()` at the start of each build. Use the `.tmp` suffix for intermediate files that should not survive a failed run (e.g. `data.parquet.tmp`, `my_table.parquet.tmp`). You don't need to clean them up manually — just name them `*.tmp` and the build system handles it.
 
 ### Using intermediate data
 
-Steps that need data from raw sources (not from another step's parquet output) should compute it in-memory:
+Steps that need data from raw sources (not from another step's output) should compute it in-memory:
 
 ```python
 # Load into temp table, use it, drop it
@@ -112,11 +122,11 @@ Prefix temp tables with `_` to distinguish from output.
 
 | Symbol | What |
 |--------|------|
-| `OUTPUT_DIR` | `Path` to `db/` |
-| `PARQUET_SETTINGS` | `"FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880"` |
+| `OUTPUT_DIR` | `Path` to output dir (`db/` or `db_sql/`) |
+| `PARQUET_SETTINGS` | `"FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880"` (Parquet variant only) |
 | `step` | The `@step` decorator |
 | `log(msg)` | Timestamped stderr logging |
-| `verify_parquet(path)` | Asserts file has >= 1 row, returns count |
+| `verify_parquet(path)` | Asserts file has >= 1 row, returns count (Parquet variant only) |
 | `STOCKS_ZIP_DIR` | `data_sources/stocks/data/` |
 | `ETFS_ZIP_DIR` | `data_sources/etfs/data/` |
 | `MARKET_CAP_DIR` | `data_sources/market_cap/data/` (CSVs with `date`, `market_cap` columns, one file per ticker, ticker in filename) |
@@ -135,18 +145,18 @@ python build.py --include-disabled # also run disabled steps
 
 ### Manifest
 
-`db/.build_manifest.json` tracks `{step_id: {completed_at, elapsed_seconds}}`. A step runs if its `step_id` is not in the manifest (new or version-bumped), if its target was explicitly requested, or if an upstream dependency was rebuilt. Delete the manifest (or use `--full`) to force a full rebuild.
+`.build_manifest.json` in the output dir tracks `{step_id: {completed_at, elapsed_seconds}}`. A step runs if its `step_id` is not in the manifest (new or version-bumped), if its target was explicitly requested, or if an upstream dependency was rebuilt. Delete the manifest (or use `--full`) to force a full rebuild.
 
 ### Checklist for adding a new step
 
-1. Create `db_creation/steps/step_{name}.py`
+1. Create `steps/step_{name}.py` in the appropriate build system
 2. Decorate with `@step("{name}_v1", target="{name}", depends_on=(...))`
-3. Write the build function following the single-file or partitioned pattern above
+3. Write the build function following the output pattern for that variant
 4. Add a summary function in `summary.py` and add it to `ALL_TABLES`
-5. Document the table schema in `TABLES.md`
+5. Document the table schema in `db_docs/TABLES.md`
 
 ### Checklist for disabling a step
 
 1. Add `disabled=True` to the `@step()` decorator
 2. Remove from `ALL_TABLES` in `summary.py` (or leave — it handles "not found" gracefully)
-3. Remove or mark the table as disabled in `TABLES.md`
+3. Remove or mark the table as disabled in `db_docs/TABLES.md`

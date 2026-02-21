@@ -11,7 +11,7 @@ Data covers stocks and ETFs, years 2000-2026. Only regular trading hours (9:00 A
 | tickers | `tickers.parquet` | Single file | `ticker` ASC | No |
 | prices | `prices/` | Hive-partitioned | `ticker` ASC, `ts` ASC | `year=YYYY/data.parquet` |
 | trading_calendar | `trading_calendar.parquet` | Single file | `trading_day_num` ASC | No |
-| daily_aggs_enriched | `daily_aggs_enriched/` | Hive-partitioned | `trading_day_num` ASC, `ticker` ASC | `year=YYYY/data.parquet` |
+| daily_aggs_enriched | `daily_aggs_enriched/` | Hive-partitioned | `ticker` ASC, `trading_day_num` ASC | `year=YYYY/data.parquet` |
 | cap_lookup | `cap_lookup/` | Hive-partitioned | `trading_day_num` ASC, `ticker` ASC | `year=YYYY/data.parquet` |
 | insider_purchases | `insider_purchases/` | Hive-partitioned | `trading_day_num` ASC, `ticker` ASC | `year=YYYY/data.parquet` |
 
@@ -123,15 +123,15 @@ WHERE day = '2024-06-15';
 
 ---
 
-## daily_aggs_enriched_v2
+## daily_aggs_enriched_v3
 
 **File:** `daily_aggs_enriched/` (Hive-partitioned directory)
 
 **Partitioning:** `year=YYYY/data.parquet` — one file per year (2000-2026)
 
-**Sort order within each partition:** `trading_day_num` ASC, `ticker` ASC
+**Sort order within each partition:** `ticker` ASC, `trading_day_num` ASC
 
-**Data:** Daily OHLCV (aggregated from hourly prices) enriched with market cap, a global trading day number shared across all tickers, and running cumulative sums per ticker. The cumulative sums enable computing any SMA with any window size via a self-join — no hardcoded windows. `trading_day_num` is monotonically increasing within each row group, enabling effective row-group pruning.
+**Data:** Daily OHLCV (aggregated from hourly prices) enriched with market cap, a global trading day number shared across all tickers, and running cumulative sums per ticker. The cumulative sums enable computing any SMA with any window size via a self-join — no hardcoded windows. Sorted by `(ticker, trading_day_num)` so each ticker's full time series is contiguous, enabling efficient per-ticker lookups and SMA self-joins.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -262,8 +262,8 @@ GROUP BY ticker;
 ## Query Efficiency Tips
 
 1. **Hive-partitioned tables (prices, daily_aggs_enriched, cap_lookup, insider_purchases):** Always include `year = ...` or `year BETWEEN ... AND ...` in WHERE clauses. This prunes entire parquet files from disk reads.
-2. **Sort order matters for query patterns.** Daily tables sort by `(trading_day_num, ticker)` — since `trading_day_num` is monotonically increasing within each row group, DuckDB can use row-group min/max statistics for effective pruning on both `trading_day_num` and `day` filters. `prices` sorts by `(ticker, ts)` for per-ticker lookups. `trading_calendar` sorts by `trading_day_num`.
-3. **Row group statistics (min/max pruning):** Each file has 122,880-row groups. Because data is sorted, the min/max stats on the sort columns don't overlap between adjacent row groups, enabling DuckDB to skip irrelevant groups entirely. For example, in `prices` (sorted by `ticker, ts`), each row group covers a contiguous range of tickers — filtering on `ticker = 'AAPL'` only reads the few row groups whose min/max ticker range includes `'AAPL'`. In `daily_aggs_enriched` (sorted by `trading_day_num, ticker`), each row group covers ~14 trading days, so a `day` or `trading_day_num` filter skips most of the file.
+2. **Sort order matters for query patterns.** `daily_aggs_enriched` sorts by `(ticker, trading_day_num)` — each ticker's full time series is contiguous, enabling efficient per-ticker lookups and SMA self-joins. `cap_lookup` and `insider_purchases` sort by `(trading_day_num, ticker)` for day-based scanning. `prices` sorts by `(ticker, ts)` for per-ticker lookups. `trading_calendar` sorts by `trading_day_num`.
+3. **Row group statistics (min/max pruning):** Each file has 122,880-row groups. Because data is sorted, the min/max stats on the sort columns don't overlap between adjacent row groups, enabling DuckDB to skip irrelevant groups entirely. For example, in `prices` (sorted by `ticker, ts`), each row group covers a contiguous range of tickers — filtering on `ticker = 'AAPL'` only reads the few row groups whose min/max ticker range includes `'AAPL'`. In `daily_aggs_enriched` (sorted by `ticker, trading_day_num`), each row group covers a contiguous range of tickers — filtering on `ticker = 'AAPL'` only reads the few row groups whose min/max ticker range includes `'AAPL'`.
 4. **Bloom filters:** DuckDB automatically writes bloom filters on dictionary-encoded and integer columns. Key columns with bloom filters: `ticker`, `ts`, `day`, and `trading_day_num`. These enable fast negative lookups — DuckDB can rule out a row group for a specific value without reading the column data.
 5. **Use `hive_partitioning=true`** when querying partitioned directories. The `year` column comes from the directory path, not the parquet data itself.
 6. **Glob pattern for partitioned tables:** Use `db/prices/**/data.parquet` (or `db/daily_aggs_enriched/**/data.parquet`, etc.). Each year partition contains a single `data.parquet` file.

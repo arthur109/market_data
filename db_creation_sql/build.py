@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Market Data Parquet Builder
+Market Data SQLite Builder
 
-Transforms raw market data from data_sources/ into sorted Parquet files in db/.
-These Parquet files are later loaded into DuckDB by the simulation engine.
+Transforms raw market data from data_sources/ into per-year SQLite databases in db_sql/.
+Uses DuckDB internally for fast computation, outputs to SQLite for query-side testing.
 
 Usage:
     python build.py                        # run only pending (new) steps
     python build.py prices                  # rebuild prices + downstream targets
-    python build.py insider_trades          # rebuild just insider_trades
+    python build.py insider_purchases       # rebuild just insider_purchases
     python build.py --full                  # wipe manifest, rebuild everything
     python build.py --list                  # show all steps and status
     python build.py --dry-run               # show what would run
@@ -140,12 +140,12 @@ def run_build(requested_targets, full_rebuild=False, dry_run=False,
 
 
 def install_db_docs():
-    """Copy db_docs/ contents (TABLES.md, CLAUDE.md) into the db/ directory."""
+    """Copy db_docs/ contents (TABLES.md, CLAUDE.md) into the db_sql/ directory."""
     docs_dir = Path(__file__).resolve().parent / "db_docs"
     for src in docs_dir.iterdir():
         if src.is_file():
             shutil.copy2(src, OUTPUT_DIR / src.name)
-    log("Installed db_docs into db/")
+    log("Installed db_docs into db_sql/")
 
 
 def list_steps():
@@ -172,7 +172,7 @@ def list_steps():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build market data Parquet files from raw sources",
+        description="Build market data SQLite databases from raw sources",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

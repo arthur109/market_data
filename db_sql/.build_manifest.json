@@ -1,0 +1,26 @@
+{
+  "tickers_v1": {
+    "completed_at": "2026-02-21T14:56:34.855836",
+    "elapsed_seconds": 0.1
+  },
+  "prices_v4": {
+    "completed_at": "2026-02-21T15:08:31.330335",
+    "elapsed_seconds": 716.5
+  },
+  "trading_calendar_v3": {
+    "completed_at": "2026-02-21T15:08:31.345522",
+    "elapsed_seconds": 0.0
+  },
+  "daily_aggs_enriched_v3": {
+    "completed_at": "2026-02-21T15:13:11.291596",
+    "elapsed_seconds": 279.9
+  },
+  "insider_purchases_v2": {
+    "completed_at": "2026-02-21T15:15:45.769769",
+    "elapsed_seconds": 154.5
+  },
+  "cap_lookup_v2": {
+    "completed_at": "2026-02-21T15:18:26.376556",
+    "elapsed_seconds": 160.6
+  }
+}
