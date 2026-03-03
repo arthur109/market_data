@@ -8,13 +8,36 @@ from build_common import (
     log, optimize_db, step, verify_table,
 )
 
+# Optional columns — set to True to include in output
+INCLUDE_SHARES = False
+INCLUDE_IS_DIRECTOR = False
+INCLUDE_IS_OFFICER = False
+INCLUDE_IS_TEN_PCT_OWNER = False
+INCLUDE_OFFICER_TITLE = False
+INCLUDE_INSIDER_NAME = False
 
-@step("insider_purchases_v2", target="insider_purchases", depends_on=("tickers", "trading_calendar"))
+
+@step("insider_purchases_v3", target="insider_purchases", depends_on=("tickers", "trading_calendar"))
 def build_insider_purchases(con):
     """SEC Form 4 open-market purchases, written to year dbs by filing date year."""
     tickers_db = str(OUTPUT_DIR / "staging_tickers.db")
     calendar_db = str(OUTPUT_DIR / "staging_calendar.db")
     jsonl_pattern = str(INSIDER_TRADES_DIR / "**" / "*.jsonl.gz")
+
+    # Build optional column lists based on flags
+    _opt = {
+        "shares":           (INCLUDE_SHARES,          "SUM(shares) AS shares",          "CAST(tx.amounts.shares AS FLOAT) AS shares"),
+        "is_director":      (INCLUDE_IS_DIRECTOR,     "MAX(is_director) AS is_director", "COALESCE(reportingOwner.relationship.isDirector, false)::INTEGER AS is_director"),
+        "is_officer":       (INCLUDE_IS_OFFICER,      "MAX(is_officer) AS is_officer",   "COALESCE(reportingOwner.relationship.isOfficer, false)::INTEGER AS is_officer"),
+        "is_ten_pct_owner": (INCLUDE_IS_TEN_PCT_OWNER, "MAX(is_ten_pct_owner) AS is_ten_pct_owner", "COALESCE(reportingOwner.relationship.isTenPercentOwner, false)::INTEGER AS is_ten_pct_owner"),
+        "officer_title":    (INCLUDE_OFFICER_TITLE,   "MAX(officer_title) AS officer_title", "reportingOwner.relationship.officerTitle AS officer_title"),
+        "insider_name":     (INCLUDE_INSIDER_NAME,    "MAX(insider_name) AS insider_name",   "reportingOwner.name AS insider_name"),
+    }
+    enabled = {k: v for k, v in _opt.items() if v[0]}
+    outer_cols = "".join(f",\n            {v[1]}" for v in enabled.values())
+    inner_cols = "".join(f",\n                {v[2]}" for v in enabled.values())
+    select_cols = "".join(f", {k}" for k in enabled)
+    prefixed_cols = "".join(f", p.{k}" for k in enabled)
 
     install_duckdb_sqlite(con)
 
@@ -23,30 +46,32 @@ def build_insider_purchases(con):
     con.execute(f"""
         CREATE TABLE _purchases AS
         SELECT
-            CAST(filedAt AS DATE) AS filing_date,
-            upper(trim(issuer.tradingSymbol)) AS ticker,
-            reportingOwner.cik AS insider_cik,
-            CAST(tx.amounts.shares * tx.amounts.pricePerShare AS FLOAT) AS total_value,
-            CAST(tx.amounts.shares AS FLOAT) AS shares,
-            COALESCE(reportingOwner.relationship.isDirector, false)::INTEGER AS is_director,
-            COALESCE(reportingOwner.relationship.isOfficer, false)::INTEGER AS is_officer,
-            COALESCE(reportingOwner.relationship.isTenPercentOwner, false)::INTEGER AS is_ten_pct_owner,
-            reportingOwner.relationship.officerTitle AS officer_title,
-            reportingOwner.name AS insider_name
-        FROM read_json(
-            '{jsonl_pattern}',
-            format='newline_delimited',
-            ignore_errors=true
-        )
-        , LATERAL UNNEST(nonDerivativeTable.transactions) AS t(tx)
-        WHERE tx.coding.code = 'P'
-          AND tx.amounts.shares IS NOT NULL
-          AND upper(trim(issuer.tradingSymbol)) != ''
-          AND upper(trim(issuer.tradingSymbol)) IN (
-              SELECT ticker FROM sqlite_scan('{tickers_db}', 'tickers')
-          )
-          AND filedAt IS NOT NULL
-          AND EXTRACT(YEAR FROM CAST(filedAt AS DATE)) BETWEEN 2000 AND 2026
+            filing_date,
+            ticker,
+            insider_cik,
+            SUM(total_value) AS total_value{outer_cols}
+        FROM (
+            SELECT
+                CAST(filedAt AS DATE) AS filing_date,
+                upper(trim(issuer.tradingSymbol)) AS ticker,
+                reportingOwner.cik AS insider_cik,
+                CAST(tx.amounts.shares * tx.amounts.pricePerShare AS FLOAT) AS total_value{inner_cols}
+            FROM read_json(
+                '{jsonl_pattern}',
+                format='newline_delimited',
+                ignore_errors=true
+            )
+            , LATERAL UNNEST(nonDerivativeTable.transactions) AS t(tx)
+            WHERE tx.coding.code = 'P'
+              AND tx.amounts.shares IS NOT NULL
+              AND upper(trim(issuer.tradingSymbol)) != ''
+              AND upper(trim(issuer.tradingSymbol)) IN (
+                  SELECT ticker FROM sqlite_scan('{tickers_db}', 'tickers')
+              )
+              AND filedAt IS NOT NULL
+              AND EXTRACT(YEAR FROM CAST(filedAt AS DATE)) BETWEEN 2000 AND 2026
+        ) raw
+        GROUP BY filing_date, ticker, insider_cik
     """)
 
     total = con.execute("SELECT COUNT(*) FROM _purchases").fetchone()[0]
@@ -60,13 +85,7 @@ def build_insider_purchases(con):
             p.filing_date,
             p.ticker,
             p.insider_cik,
-            p.total_value,
-            p.shares,
-            p.is_director,
-            p.is_officer,
-            p.is_ten_pct_owner,
-            p.officer_title,
-            p.insider_name,
+            p.total_value{prefixed_cols},
             cal.trading_day_num
         FROM _purchases p
         ASOF JOIN (
@@ -89,12 +108,14 @@ def build_insider_purchases(con):
     total_years = len(years)
     total_rows = 0
 
+    # Build column list for final SELECT and INSERT
+    final_cols = f"strftime(filing_date, '%Y%m%d')::INTEGER, ticker, insider_cik, total_value{select_cols}, trading_day_num"
+    placeholders = ", ".join(["?"] * (4 + len(enabled) + 1))
+
     for yr_idx, year in enumerate(years):
         rows = con.execute(f"""
             SELECT
-                strftime(filing_date, '%Y%m%d')::INTEGER, ticker, insider_cik, total_value, shares,
-                is_director, is_officer, is_ten_pct_owner,
-                officer_title, insider_name, trading_day_num
+                {final_cols}
             FROM _purchases_tdn
             WHERE EXTRACT(YEAR FROM filing_date) = {year}
             ORDER BY trading_day_num, ticker
@@ -106,7 +127,7 @@ def build_insider_purchases(con):
         sconn.execute("PRAGMA foreign_keys = ON")
         create_table(sconn, "insider_purchases", with_indexes=False)
         sconn.executemany(
-            "INSERT INTO insider_purchases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO insider_purchases VALUES ({placeholders})",
             rows,
         )
         create_indexes(sconn, "insider_purchases")

@@ -223,16 +223,10 @@ WHERE trading_day_num = 6500
 | filing_date | INTEGER | SEC filing date as YYYYMMDD |
 | ticker | TEXT | Uppercase ticker symbol (FK: `tickers`) |
 | insider_cik | TEXT | SEC CIK identifier for the insider |
-| total_value | REAL | `shares * pricePerShare` (may be NULL) |
-| shares | REAL | Number of shares purchased |
-| is_director | INTEGER | 1 if insider is a board director, 0 otherwise |
-| is_officer | INTEGER | 1 if insider is a company officer, 0 otherwise |
-| is_ten_pct_owner | INTEGER | 1 if insider is a 10%+ owner, 0 otherwise |
-| officer_title | TEXT | Officer title if applicable (may be NULL) |
-| insider_name | TEXT | Name of the reporting insider |
+| total_value | REAL | `shares * pricePerShare` (summed across same-day transactions; may be NULL) |
 | trading_day_num | INTEGER | Global trading day number (next trading day on or after filing_date; FK: `trading_calendar`) |
 
-**Data:** SEC Form 4 open-market purchases only. `trading_day_num` mapped so weekend/holiday filings point to the next trading day.
+**Data:** SEC Form 4 open-market purchases only. Multiple purchases by the same insider on the same filing date for the same ticker are combined into a single row (total_value is summed, preserving the weighted average price). `trading_day_num` mapped so weekend/holiday filings point to the next trading day.
 
 **Query:**
 ```sql

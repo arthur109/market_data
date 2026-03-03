@@ -299,12 +299,6 @@ TABLE_SCHEMAS = {
                 ticker TEXT NOT NULL REFERENCES tickers(ticker),
                 insider_cik TEXT,
                 total_value REAL,
-                shares REAL,
-                is_director INTEGER NOT NULL,
-                is_officer INTEGER NOT NULL,
-                is_ten_pct_owner INTEGER NOT NULL,
-                officer_title TEXT,
-                insider_name TEXT,
                 trading_day_num INTEGER REFERENCES trading_calendar(trading_day_num)
             ) STRICT
         """,

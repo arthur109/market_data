@@ -22,5 +22,9 @@
   "cap_lookup_v2": {
     "completed_at": "2026-02-21T15:18:26.376556",
     "elapsed_seconds": 160.6
+  },
+  "insider_purchases_v3": {
+    "completed_at": "2026-02-21T19:35:12.973847",
+    "elapsed_seconds": 161.1
   }
 }
