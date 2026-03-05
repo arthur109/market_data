@@ -251,7 +251,7 @@ TABLE_SCHEMAS = {
             ) STRICT
         """,
         "indexes": [
-            "CREATE INDEX idx_prices_ticker_ts ON prices (ticker, ts)",
+            "CREATE INDEX idx_prices_ticker_ts ON prices (ticker, ts, close)",
             "CREATE INDEX idx_prices_tdn_ticker ON prices (trading_day_num, ticker)",
         ],
     },

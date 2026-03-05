@@ -1,7 +1,6 @@
-"""Step 2: Extract ZIP archives and build per-year SQLite databases with hourly price data."""
+"""Step 2: Extract ZIP archives and build Hive-partitioned hourly price data."""
 
 import shutil
-import sqlite3
 import tempfile
 import zipfile
 from pathlib import Path
@@ -10,36 +9,32 @@ import duckdb
 
 from build_common import (
     DUCKDB_MEMORY_LIMIT, DUCKDB_THREADS, ETFS_ZIP_DIR, OUTPUT_DIR,
-    REGULAR_HOURS_END, REGULAR_HOURS_START,
+    PARQUET_SETTINGS, REGULAR_HOURS_END, REGULAR_HOURS_START,
     STOCKS_ZIP_DIR, TICKER_SUFFIX,
-    create_indexes, create_table, log, log_progress, open_year_db_tmp,
-    optimize_db, step, verify_table, write_reference_tables,
+    log, log_progress, step, verify_parquet,
 )
 
-# Parquet settings for temp intermediate files (DuckDB computation only)
-PARQUET_SETTINGS = "FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 122880"
 
-
-@step("prices_v5", target="prices", depends_on=("tickers",))
+@step("prices_v4", target="prices", depends_on=("tickers",))
 def build_prices(con):
     """
-    Four-pass approach:
+    Three-pass approach:
     Pass 1: Extract each ZIP, read CSVs, write temp parquet partitioned by year
-    Pass 2: For each year, merge fragments, deduplicate, sort, write final temp parquet
-    Pass 3: Compute global trading_day_num, write staging_calendar.db,
-            enrich each year temp parquet with trading_day_num
-    Pass 4: For each year, create {year}.db with reference tables + prices from temp parquet
+    Pass 2: For each year, merge fragments, deduplicate, sort, write final
+    Pass 3: Compute global trading_day_num, write trading_calendar.parquet,
+            enrich each year partition with trading_day_num
     """
+    prices_dir = OUTPUT_DIR / "prices"
+    building_dir = OUTPUT_DIR / "prices_building"
     temp_fragments_dir = OUTPUT_DIR / "_prices_temp_fragments"
-    temp_merged_dir = OUTPUT_DIR / "_prices_temp_merged"
 
     # Clean any prior state
-    for d in [temp_fragments_dir, temp_merged_dir]:
+    for d in [building_dir, temp_fragments_dir]:
         if d.exists():
             shutil.rmtree(d)
 
     temp_fragments_dir.mkdir(parents=True)
-    temp_merged_dir.mkdir(parents=True)
+    building_dir.mkdir(parents=True)
 
     # Collect all ZIPs
     stock_zips = sorted(STOCKS_ZIP_DIR.glob("*.zip"))
@@ -134,7 +129,7 @@ def build_prices(con):
             finally:
                 zcon.close()
 
-    # Pass 2: For each year, merge fragments, deduplicate, sort, write temp merged parquet
+    # Pass 2: For each year, merge fragments, deduplicate, sort, write final
     log("Pass 2: Merging fragments per year...")
     year_dirs = sorted(temp_fragments_dir.glob("year=*"))
     total_years = len(year_dirs)
@@ -143,7 +138,9 @@ def build_prices(con):
         year = year_dir.name.split("=")[1]
         log_progress(yr_idx + 1, total_years, f"Merging year={year}")
 
-        out_path = temp_merged_dir / f"{year}.parquet"
+        out_dir = building_dir / f"year={year}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "data.parquet"
 
         mcon = duckdb.connect(":memory:")
         mcon.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
@@ -152,6 +149,7 @@ def build_prices(con):
         frag_pattern = str(year_dir / "*.parquet")
 
         # Read all fragments for this year, deduplicate: ETF wins over stock
+        # Use ROW_NUMBER to pick ETF over stock for overlapping (ticker, ts) pairs
         mcon.execute(f"""
             COPY (
                 SELECT ticker, ts, open, high, low, close, volume
@@ -169,15 +167,27 @@ def build_prices(con):
         """)
         mcon.close()
 
-        log(f"  year={year}: merged")
+        count = verify_parquet(str(out_path))
+        log(f"  year={year}: {count:,} rows")
+
+    # Swap in the final directory
+    if prices_dir.exists():
+        stale = Path(str(prices_dir) + "_old")
+        prices_dir.rename(stale)
+        building_dir.rename(prices_dir)
+        shutil.rmtree(stale)
+    else:
+        building_dir.rename(prices_dir)
 
     # Clean up temp fragments
     shutil.rmtree(temp_fragments_dir)
 
-    # Pass 3: Compute global trading_day_num and write staging_calendar.db
+    # Pass 3: Compute global trading_day_num and write trading_calendar.parquet
     log("Pass 3: Computing global trading_day_num...")
 
-    merged_pattern = str(temp_merged_dir / "*.parquet")
+    prices_pattern = str(prices_dir / "**" / "*.parquet")
+    calendar_dest = OUTPUT_DIR / "trading_calendar.parquet"
+    calendar_tmp = Path(str(calendar_dest) + ".tmp")
 
     ccon = duckdb.connect(":memory:")
     ccon.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
@@ -190,7 +200,7 @@ def build_prices(con):
             ROW_NUMBER() OVER (ORDER BY day)::SMALLINT AS trading_day_num
         FROM (
             SELECT DISTINCT CAST(ts AS DATE) AS day
-            FROM read_parquet('{merged_pattern}')
+            FROM read_parquet('{prices_pattern}', hive_partitioning=true)
         )
     """)
 
@@ -198,105 +208,36 @@ def build_prices(con):
     cal_range = ccon.execute("SELECT MIN(day), MAX(day) FROM _calendar").fetchone()
     log(f"  {cal_count:,} trading days ({cal_range[0]} to {cal_range[1]})")
 
-    # Write staging_calendar.db
-    calendar_dest = OUTPUT_DIR / "staging_calendar.db"
-    calendar_tmp = Path(str(calendar_dest) + ".tmp")
-    if calendar_tmp.exists():
-        calendar_tmp.unlink()
-
-    cal_rows = ccon.execute(
-        "SELECT trading_day_num, strftime(day, '%Y%m%d')::INTEGER FROM _calendar ORDER BY trading_day_num"
-    ).fetchall()
-
-    scalconn = sqlite3.connect(str(calendar_tmp))
-    scalconn.execute("PRAGMA journal_mode = WAL")
-    scalconn.execute("""
-        CREATE TABLE trading_calendar (
-            trading_day_num INTEGER PRIMARY KEY,
-            day INTEGER NOT NULL
-        ) WITHOUT ROWID, STRICT
+    ccon.execute(f"""
+        COPY (SELECT trading_day_num, day FROM _calendar ORDER BY trading_day_num)
+        TO '{calendar_tmp}' ({PARQUET_SETTINGS})
     """)
-    scalconn.executemany("INSERT INTO trading_calendar VALUES (?, ?)", cal_rows)
-    scalconn.commit()
-    scalconn.close()
-    optimize_db(str(calendar_tmp))
     calendar_tmp.rename(calendar_dest)
-    log("  Wrote staging_calendar.db")
+    verify_parquet(str(calendar_dest))
+    log(f"  Wrote trading_calendar.parquet")
 
-    # Enrich each year's temp parquet with trading_day_num
-    log("  Enriching temp parquet partitions with trading_day_num...")
-    merged_files = sorted(temp_merged_dir.glob("*.parquet"))
-    for mf in merged_files:
-        year = mf.stem
-        enriched_path = temp_merged_dir / f"{year}_enriched.parquet"
+    # Enrich each year partition with trading_day_num
+    log("  Enriching price partitions with trading_day_num...")
+    year_dirs = sorted(prices_dir.glob("year=*"))
+    for year_dir in year_dirs:
+        year = year_dir.name.split("=")[1]
+        data_path = year_dir / "data.parquet"
+        tmp_path = year_dir / "data.parquet.tmp"
 
         ccon.execute(f"""
             COPY (
-                SELECT p.ticker, epoch(p.ts)::BIGINT AS ts, p.open, p.high, p.low, p.close, p.volume,
+                SELECT p.ticker, p.ts, p.open, p.high, p.low, p.close, p.volume,
                        c.trading_day_num
-                FROM read_parquet('{mf}') p
+                FROM read_parquet('{data_path}') p
                 JOIN _calendar c ON CAST(p.ts AS DATE) = c.day
                 ORDER BY p.ticker, p.ts
-            ) TO '{enriched_path}' ({PARQUET_SETTINGS})
+            ) TO '{tmp_path}' ({PARQUET_SETTINGS})
         """)
-        # Replace original with enriched
-        mf.unlink()
-        enriched_path.rename(mf)
+        tmp_path.rename(data_path)
         log(f"    year={year}: enriched")
 
     ccon.execute("DROP TABLE _calendar")
     ccon.close()
 
-    # Pass 4: Create year .db files from enriched temp parquet
-    log("Pass 4: Writing year SQLite databases...")
-
-    # Load reference data
-    tickers_db = OUTPUT_DIR / "staging_tickers.db"
-    tconn = sqlite3.connect(str(tickers_db))
-    tickers_rows = tconn.execute("SELECT ticker, asset_type FROM tickers ORDER BY ticker").fetchall()
-    tconn.close()
-
-    calendar_conn = sqlite3.connect(str(calendar_dest))
-    calendar_rows = calendar_conn.execute(
-        "SELECT trading_day_num, day FROM trading_calendar ORDER BY trading_day_num"
-    ).fetchall()
-    calendar_conn.close()
-
-    merged_files = sorted(temp_merged_dir.glob("*.parquet"))
-    total_rows = 0
-
-    for mf in merged_files:
-        year = int(mf.stem)
-
-        # Read prices from enriched temp parquet via DuckDB
-        pcon = duckdb.connect(":memory:")
-        rows = pcon.execute(f"""
-            SELECT ticker, ts, open, high, low, close, volume, trading_day_num
-            FROM read_parquet('{mf}')
-            ORDER BY ticker, ts
-        """).fetchall()
-        pcon.close()
-
-        # Create year .db.tmp
-        sconn = open_year_db_tmp(year)
-        write_reference_tables(sconn, tickers_rows, calendar_rows)
-        create_table(sconn, "prices", with_indexes=False)
-        sconn.executemany("INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-        create_indexes(sconn, "prices")
-        sconn.commit()
-        sconn.close()
-
-        # Optimize and atomic rename
-        tmp_path = OUTPUT_DIR / f"{year}.db.tmp"
-        dest_path = OUTPUT_DIR / f"{year}.db"
-        optimize_db(str(tmp_path))
-        tmp_path.rename(dest_path)
-
-        count = verify_table(str(dest_path), "prices")
-        total_rows += count
-        log(f"  {year}.db: {count:,} price rows")
-
-    # Clean up temp merged parquet
-    shutil.rmtree(temp_merged_dir)
-
-    log(f"  Wrote {total_rows:,} total price rows across {len(merged_files)} year dbs")
+    total = verify_parquet(str(prices_dir / "**" / "*.parquet"))
+    log(f"  Wrote {total:,} total price rows")

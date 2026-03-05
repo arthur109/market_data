@@ -8,7 +8,7 @@
     "elapsed_seconds": 716.5
   },
   "trading_calendar_v3": {
-    "completed_at": "2026-02-21T15:08:31.345522",
+    "completed_at": "2026-03-04T19:29:49.305415",
     "elapsed_seconds": 0.0
   },
   "daily_aggs_enriched_v3": {
@@ -20,11 +20,63 @@
     "elapsed_seconds": 154.5
   },
   "cap_lookup_v2": {
-    "completed_at": "2026-02-21T15:18:26.376556",
-    "elapsed_seconds": 160.6
+    "completed_at": "2026-03-04T19:38:55.212610",
+    "elapsed_seconds": 113.8
   },
   "insider_purchases_v3": {
-    "completed_at": "2026-02-21T19:35:12.973847",
-    "elapsed_seconds": 161.1
+    "completed_at": "2026-03-04T19:32:42.033131",
+    "elapsed_seconds": 101.1
+  },
+  "data_quality_v1": {
+    "completed_at": "2026-03-03T15:46:46.712567",
+    "elapsed_seconds": 39.1
+  },
+  "daily_aggs_enriched_v4": {
+    "completed_at": "2026-03-03T17:20:31.500023",
+    "elapsed_seconds": 1751.4
+  },
+  "data_quality_v2": {
+    "completed_at": "2026-03-03T16:37:21.583576",
+    "elapsed_seconds": 38.7
+  },
+  "data_quality_v3": {
+    "completed_at": "2026-03-03T16:51:20.148319",
+    "elapsed_seconds": 37.3
+  },
+  "data_quality_v5": {
+    "completed_at": "2026-03-04T17:12:57.087601",
+    "elapsed_seconds": 67.1
+  },
+  "daily_aggs_enriched_v5": {
+    "completed_at": "2026-03-04T19:37:01.398598",
+    "elapsed_seconds": 259.4
+  },
+  "data_quality_v6": {
+    "completed_at": "2026-03-04T17:18:20.126611",
+    "elapsed_seconds": 67.3
+  },
+  "data_quality_v7": {
+    "completed_at": "2026-03-04T17:22:42.197619",
+    "elapsed_seconds": 68.1
+  },
+  "data_quality_v8": {
+    "completed_at": "2026-03-04T17:31:45.381698",
+    "elapsed_seconds": 75.3
+  },
+  "data_quality_v9": {
+    "completed_at": "2026-03-04T17:38:25.604879",
+    "elapsed_seconds": 65.4
+  },
+  "data_quality_v10": {
+    "completed_at": "2026-03-04T17:42:43.824667",
+    "elapsed_seconds": 76.6
+  },
+  "data_quality_v11": {
+    "completed_at": "2026-03-04T19:31:00.944881",
+    "elapsed_seconds": 71.6
+  },
+  "prices_v5": {
+    "completed_at": "2026-03-04T19:29:49.292868",
+    "elapsed_seconds": 518.1
   }
 }

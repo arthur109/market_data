@@ -44,7 +44,8 @@ tickers ──> prices ──> trading_calendar
 **Direct dependencies:**
 - `prices` depends on `tickers`
 - `trading_calendar` depends on `prices`
-- `daily_aggs_enriched` depends on `prices`, `trading_calendar` (+ reads market_cap CSVs directly)
+- `data_quality` depends on `prices`, `trading_calendar`
+- `daily_aggs_enriched` depends on `prices`, `trading_calendar`, `data_quality` (+ reads market_cap CSVs directly)
 - `cap_lookup` depends on `daily_aggs_enriched`
 - `insider_purchases` depends on `tickers`, `trading_calendar`
 
@@ -148,6 +149,8 @@ SELECT * FROM prices WHERE trading_day_num = 6500;
 | cum_volume | REAL | Running cumulative sum of `volume` |
 
 **Data:** Daily OHLCV aggregated from hourly prices, enriched with market cap and running cumulative sums per ticker. Cumulative sums enable computing any SMA via a self-join on `trading_day_num`.
+
+**Data quality filtering:** If `data_quality_exclusions.csv` exists in the output directory, rows matching `(ticker, day)` pairs in that file are excluded before aggregation. This removes flagged bad price ticks (e.g., garbage prices orders of magnitude away from the rolling median). Run `python build.py data_quality` to generate the exclusion file, review/edit it, then rebuild this table.
 
 **Query:**
 ```sql

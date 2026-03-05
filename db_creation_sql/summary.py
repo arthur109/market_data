@@ -334,15 +334,15 @@ def summarize_insider_purchases():
     # filing_date is YYYYMMDD integer
     mid_year, mid_path = year_dbs[len(year_dbs) // 2]
     sample = q(mid_path, """
-        SELECT filing_date, ticker, shares, total_value, insider_name, trading_day_num
+        SELECT filing_date, ticker, insider_cik, total_value, trading_day_num
         FROM insider_purchases ORDER BY RANDOM() LIMIT 5
     """)
     print(f"\n  Sample rows (from {mid_year}.db):")
-    for fd, t, s, tv, name, tdn in sample:
+    for fd, t, cik, tv, tdn in sample:
         tv_str = f"${fmt(tv)}" if tv else "N/A"
-        name_str = (name[:30] + "...") if name and len(name) > 30 else (name or "N/A")
+        cik_str = cik or "N/A"
         tdn_str = fmt(tdn) if tdn is not None else "N/A"
-        print(f"    {t:>6} | {fmt_date(fd)} | {fmt(s)} shares | {tv_str} | tdn:{tdn_str} | {name_str}")
+        print(f"    {t:>6} | {fmt_date(fd)} | {tv_str} | tdn:{tdn_str} | cik:{cik_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +377,55 @@ def summarize_trading_calendar():
 
 
 # ---------------------------------------------------------------------------
+# Data Quality
+# ---------------------------------------------------------------------------
+
+def summarize_data_quality():
+    p = DB_DIR / "staging_exclusions.db"
+    if not p.exists():
+        section("DATA QUALITY — not found"); return
+    section("DATA QUALITY EXCLUSIONS")
+
+    conn = sqlite3.connect(str(p))
+    nuked_count = conn.execute("SELECT COUNT(*) FROM nuked_tickers").fetchone()[0]
+    dropped_count = conn.execute("SELECT COUNT(*) FROM dropped_bars").fetchone()[0]
+
+    print(f"  File: {file_size(p)}")
+    print(f"  Nuked tickers: {fmt(nuked_count)}")
+    print(f"  Dropped bars: {fmt(dropped_count)}")
+
+    if nuked_count > 0:
+        reasons = conn.execute(
+            "SELECT nuke_reason, COUNT(*) FROM nuked_tickers GROUP BY nuke_reason ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        print(f"\n  Nuke reasons:")
+        for reason, count in reasons:
+            print(f"    {reason}: {fmt(count)}")
+
+        sample = conn.execute("SELECT ticker, nuke_reason FROM nuked_tickers ORDER BY ticker LIMIT 10").fetchall()
+        print(f"\n  Sample nuked tickers:")
+        for ticker, reason in sample:
+            print(f"    {ticker:>6}  {reason}")
+
+    if dropped_count > 0:
+        reasons = conn.execute(
+            "SELECT flag_reason, COUNT(*) FROM dropped_bars GROUP BY flag_reason ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        print(f"\n  Drop reasons:")
+        for reason, count in reasons:
+            print(f"    {reason}: {fmt(count)}")
+
+        sample = conn.execute(
+            "SELECT ticker, ts, flag_reason FROM dropped_bars ORDER BY ticker, ts LIMIT 10"
+        ).fetchall()
+        print(f"\n  Sample dropped bars:")
+        for ticker, ts, reason in sample:
+            print(f"    {ticker:>6} | {fmt_ts(ts)} | {reason}")
+
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -387,6 +436,7 @@ ALL_TABLES = {
     "cap_lookup": summarize_cap_lookup,
     "insider_purchases": summarize_insider_purchases,
     "trading_calendar": summarize_trading_calendar,
+    "data_quality": summarize_data_quality,
 }
 
 

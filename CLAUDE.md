@@ -160,3 +160,95 @@ python build.py --include-disabled # also run disabled steps
 1. Add `disabled=True` to the `@step()` decorator
 2. Remove from `ALL_TABLES` in `summary.py` (or leave — it handles "not found" gracefully)
 3. Remove or mark the table as disabled in `db_docs/TABLES.md`
+
+---
+
+## Data Quality Pipeline
+
+Raw hourly price data contains garbage prices (stocks flipping between ~$14 and $0.016, zero closes, split-adjustment artifacts). The data quality pipeline detects anomalies at the **hourly bar level**, decides what to nuke vs drop, and applies cleanup before building daily aggregates.
+
+### Architecture
+
+```
+step_data_quality  →  step_daily_aggs_enriched
+   (detect + decide)       (apply exclusions when building daily aggs)
+```
+
+### Detection (`step_data_quality`)
+
+Scans all hourly bars from year SQLite databases. For each bar, computes:
+- `prev_close` / `next_close` via LAG/LEAD
+- `median_before`: median of the **50 bars before** (~7 trading days)
+- `median_after`: median of the **50 bars after**
+
+A bar is flagged if **both** medians agree it's anomalous:
+- `zero_or_negative`: close ≤ 0, or both medians ≤ 0
+- `price_too_low`: close < 15% of both medians
+- `price_too_high`: close > 7× both medians
+- Edge: if one median is NULL or ≤ 0, that side auto-qualifies
+
+**Why both medians?** A real price change has an after-median matching the new price, so it won't trigger. Garbage data differs from both windows.
+
+### Nuke Rules
+
+A flagged ticker gets **nuked** (all data removed from all tables) if it hits any of:
+
+| # | Rule | Condition |
+|---|------|-----------|
+| 1 | Absurd absolute price | Any flagged close > $1,000,000 |
+| 2 | Absurd relative price | Any flagged close > 100× either median |
+| 3 | High anomaly count | 5+ anomalous trading days |
+| 4 | Derivative suffix | Ticker matches `^[A-Z]{2,5}(WS\|W\|R\|P\|U)$` |
+| 5 | Stock died | Any after-median = $0.00 |
+| 6 | Contaminated medians | Either median > 50× close, 2+ anomalous days |
+
+Surviving tickers (1–2 minor anomalies, no rule match) → only those specific bars are dropped.
+
+### Output
+
+Writes **`db_sql/staging_exclusions.db`** with two tables:
+
+```sql
+CREATE TABLE nuked_tickers (
+    ticker TEXT PRIMARY KEY,
+    nuke_reason TEXT NOT NULL
+) WITHOUT ROWID, STRICT;
+
+CREATE TABLE dropped_bars (
+    ticker TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    flag_reason TEXT NOT NULL,
+    PRIMARY KEY (ticker, ts)
+) WITHOUT ROWID, STRICT;
+```
+
+### Applying Exclusions (`step_daily_aggs_enriched`)
+
+Before aggregating hourly bars to daily OHLCV:
+1. Reads `staging_exclusions.db` (if it exists)
+2. Deletes all hourly bars for nuked tickers
+3. Deletes specific flagged hourly bars for surviving tickers
+4. Then aggregates remaining clean bars to daily
+
+A day with 1 bad bar out of 7 keeps its other 6 bars — the daily OHLCV is computed from the surviving bars.
+
+### Usage
+
+```bash
+cd db_creation_sql
+
+# Run detection — prints color-coded report, writes staging_exclusions.db
+python build.py data_quality
+
+# Review the staging DB
+sqlite3 ../db_sql/staging_exclusions.db "SELECT COUNT(*) FROM nuked_tickers; SELECT COUNT(*) FROM dropped_bars;"
+
+# Rebuild daily_aggs_enriched to apply exclusions
+python build.py daily_aggs_enriched
+```
+
+On a full build (`--full`), both steps run in sequence automatically.
+
+### Tuning the thresholds
+
+Detection thresholds are hardcoded in `step_data_quality.py`: `< 0.15` (too low) and `> 7` (too high). Nuke rules are in `_apply_nuke_rules()`. To change them, edit the code and bump the step_id version.

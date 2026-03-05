@@ -9,7 +9,7 @@ from build_common import (
 )
 
 
-@step("daily_aggs_enriched_v3", target="daily_aggs_enriched", depends_on=("prices", "trading_calendar"))
+@step("daily_aggs_enriched_v5", target="daily_aggs_enriched", depends_on=("prices", "trading_calendar", "data_quality"))
 def build_daily_aggs_enriched(con):
     """Daily OHLCV enriched with market cap, global trading day number, and cumulative sums."""
     csv_pattern = str(MARKET_CAP_DIR / "*.csv")
@@ -23,6 +23,40 @@ def build_daily_aggs_enriched(con):
     log("Loading prices from year SQLite databases...")
     parts = [f"SELECT ticker, to_timestamp(ts) AS ts, open, high, low, close, volume, trading_day_num FROM sqlite_scan('{p}', 'prices')" for _, p in year_dbs]
     con.execute(f"CREATE TABLE _all_prices AS {' UNION ALL '.join(parts)}")
+
+    # Apply data quality exclusions before aggregation
+    staging_path = OUTPUT_DIR / "staging_exclusions.db"
+    if staging_path.exists():
+        log("Applying data quality exclusions from staging_exclusions.db...")
+        before = con.execute("SELECT COUNT(*) FROM _all_prices").fetchone()[0]
+
+        nuked_count = con.execute(
+            f"SELECT COUNT(*) FROM sqlite_scan('{staging_path}', 'nuked_tickers')"
+        ).fetchone()[0]
+        if nuked_count:
+            con.execute(f"""
+                DELETE FROM _all_prices
+                WHERE ticker IN (SELECT ticker FROM sqlite_scan('{staging_path}', 'nuked_tickers'))
+            """)
+
+        dropped_count = con.execute(
+            f"SELECT COUNT(*) FROM sqlite_scan('{staging_path}', 'dropped_bars')"
+        ).fetchone()[0]
+        if dropped_count:
+            # ts in _all_prices is TIMESTAMP (via to_timestamp), staging has INTEGER epoch
+            con.execute(f"""
+                CREATE TABLE _drop AS
+                SELECT ticker, to_timestamp(ts) AS ts
+                FROM sqlite_scan('{staging_path}', 'dropped_bars')
+            """)
+            con.execute("DELETE FROM _all_prices WHERE (ticker, ts) IN (SELECT ticker, ts FROM _drop)")
+            con.execute("DROP TABLE _drop")
+
+        after = con.execute("SELECT COUNT(*) FROM _all_prices").fetchone()[0]
+        excluded = before - after
+        log(f"  Nuked {nuked_count:,} tickers, dropped {dropped_count:,} individual bars, excluded {excluded:,} total rows")
+    else:
+        log("No staging_exclusions.db found — no filtering applied.")
 
     log("Aggregating hourly prices into daily OHLCV...")
 
